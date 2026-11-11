@@ -1,0 +1,43 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      neo4j:
+        image: neo4j:5.26.33-community
+        env:
+          NEO4J_AUTH: neo4j/chronicle-ci-password
+        ports:
+          - 7687:7687
+        options: >-
+          --health-cmd "cypher-shell -u neo4j -p chronicle-ci-password 'RETURN 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      MEMORY_NEO4J_URI: bolt://127.0.0.1:7687
+      MEMORY_NEO4J_USER: neo4j
+      MEMORY_NEO4J_PASSWORD: chronicle-ci-password
+      MEMORY_NEO4J_DATABASE: neo4j
+      MEMORY_NAMESPACE: ci
+      MEMORY_LLM_MODEL: ""
+      MEMORY_EMBEDDING_MODEL: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run chronicle init
+      - run: uv run pytest -q
+      - run: uv build
