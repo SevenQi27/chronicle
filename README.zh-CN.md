@@ -74,6 +74,18 @@ uv run chronicle history --entity-id friend-lin --namespace tutorial
 
 同时写入多段经历及有据可查的认识，参见 [`examples/experience.json`](examples/experience.json)。
 
+## 探索记忆图谱
+
+启动本地只读的 **Chronicle 记忆观测台**：
+
+```sh
+uv run chronicle ui --namespace personal --port 8765
+```
+
+打开 <http://127.0.0.1:8765>，namespace 与 Agent 保持一致。页面连接已配置的 Neo4j，展示真实记忆版本、实体、来源及其关系，支持 3D 旋转视图、时间布局、文字与类型筛选，以及正文和原始证据详情。拖拽旋转、滚轮缩放，也可通过侧栏选择节点。点击刷新加载新写入的记忆。
+
+时间滑轨筛选的是**记忆被获知的时间**，不是经历的发生时间；范围为最近加载的 200 个记忆版本及其连接，不等于完整的历史状态回放。显式关联使用当前关联视角，超出数量时页面会提示。服务仅监听 `127.0.0.1`，不提供写入接口，静态资源全部在本地，不需要 CDN 或额外前端依赖。使用页面时保持命令运行；Ctrl+C 只停止页面服务，不停止 Neo4j 或 MCP。
+
 ## 接入 Agent
 
 有 shell 权限的 Agent 可以直接执行 CLI，也可以通过 **stdio MCP 服务**调用同一组操作。同一用户或工作空间使用一致的 namespace，以便跨会话、跨 Agent 共享记忆。

@@ -43,6 +43,8 @@ def parser():
     init.add_argument('--wait',type=float,default=30,help='等待数据库就绪的秒数')
     worker=sub.add_parser('worker',help='持续处理时间检查，支持 SIGINT/SIGTERM 停止',parents=[shared])
     worker.add_argument('--interval',type=float)
+    ui=sub.add_parser('ui',help='启动本地只读 3D 记忆观测台',parents=[shared])
+    ui.add_argument('--port',type=int,default=8765)
     config=sub.add_parser('config',help='打印客户端配置片段',parents=[shared])
     config.add_argument('agent',choices=['codex','claude','claude-desktop'])
     for name in ('remember','ingest','resolve'):
@@ -185,6 +187,10 @@ def main():
             raise ValueError('MCP --env-file 必须是绝对路径')
         settings=Settings.from_env(env_file)
         if hasattr(args,'namespace'):settings.namespace=args.namespace
+        if args.command=='ui':
+            from .ui import serve
+            serve(settings,args.port)
+            return
         if args.command=='demo':
             from .demo import run_demo
             run_demo(settings);return

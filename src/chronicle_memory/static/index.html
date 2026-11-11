@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark"><meta name="description" content="Chronicle 本地记忆观测台：在三维空间中探索经历、认识与来源。">
+  <title>Chronicle — 记忆观测台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%230c1217'/%3E%3Cellipse cx='32' cy='32' rx='24' ry='10' fill='none' stroke='%23a8efcf' stroke-width='3' transform='rotate(-35 32 32)'/%3E%3Ccircle cx='32' cy='32' r='7' fill='%23a8efcf'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Chronicle 首页"><svg viewBox="0 0 42 42" aria-hidden="true"><ellipse cx="21" cy="21" rx="19" ry="8" transform="rotate(-35 21 21)"/><circle cx="21" cy="21" r="5"/></svg><span>chronicle<span class="brand-dot">.</span></span><span class="edition">OBSERVATORY</span></a>
+    <nav class="view-tabs" aria-label="图谱布局"><button class="view-tab active" data-layout="orbit" aria-pressed="true"><span>◎</span> 记忆宇宙</button><button class="view-tab" data-layout="timeline" aria-pressed="false"><span>≋</span> 时间轨迹</button></nav>
+    <div class="connection"><span class="status-dot" id="status-dot"></span><span id="connection-label">正在连接</span><span class="local-tag">LOCAL</span><button id="refresh" class="icon-button" aria-label="刷新记忆" title="刷新记忆">↻</button></div>
+  </header>
+  <main class="workspace">
+    <aside class="library">
+      <div class="workspace-label">WORKSPACE <span>↗</span></div>
+      <div class="namespace-row"><span class="namespace-icon">C</span><div><strong id="namespace">—</strong><small>私人记忆空间</small></div><span class="read-only">只读</span></div>
+      <label class="search"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg><input id="search" type="search" placeholder="搜索记忆与实体…" aria-label="搜索记忆与实体"><kbd>/</kbd></label>
+      <div class="section-heading">记忆图层 <span>LAYERS</span></div>
+      <div class="layers" aria-label="节点类型筛选">
+        <button class="layer active" data-kind="all" aria-pressed="true"><span class="layer-icon all">◈</span><span>全部节点</span><b id="count-all">00</b></button>
+        <button class="layer" data-kind="experience" aria-pressed="false"><span class="layer-icon experience">●</span><span>经历</span><b id="count-experience">00</b></button>
+        <button class="layer" data-kind="understanding" aria-pressed="false"><span class="layer-icon understanding">◆</span><span>认识</span><b id="count-understanding">00</b></button>
+        <button class="layer" data-kind="entity" aria-pressed="false"><span class="layer-icon entity">✳</span><span>人物与主题</span><b id="count-entity">00</b></button>
+        <button class="layer" data-kind="source" aria-pressed="false"><span class="layer-icon source">▤</span><span>来源证据</span><b id="count-source">00</b></button>
+        <button class="layer" data-kind="state" aria-pressed="false"><span class="layer-icon state">◷</span><span>事实与计划</span><b id="count-state">00</b></button>
+      </div>
+      <div class="section-heading recent-heading">探索记录 <span id="result-count">0</span></div>
+      <div id="memory-list" class="memory-list" aria-label="可选择的图谱节点"></div>
+      <div class="library-bottom"><span class="tiny-orbit">◎</span><p>每一次回忆，<br>都沿着证据发生。</p><small>BUILT ON NEO4J</small></div>
+    </aside>
+    <section class="observatory" aria-label="三维记忆图谱">
+      <div class="canvas-area" id="canvas-area">
+        <canvas id="graph" aria-label="拖拽旋转、滚轮缩放的三维记忆图谱；也可通过左侧列表选择节点。" tabindex="0"></canvas>
+        <div class="scene-heading"><div class="eyebrow"><span></span> YOUR MEMORY, IN ORBIT</div><h1>在时间里，<br>看见连接<span>。</span></h1><p>经历沉淀为记忆，证据连接成认识。</p></div>
+        <div class="scene-index"><span>LIVE GRAPH</span><strong id="graph-count">—</strong><small id="graph-caption">读取记忆图谱</small></div>
+        <div id="notice" class="notice hidden" role="status"></div>
+        <div id="empty" class="empty hidden"><span>◎</span><h2>你的记忆宇宙，等待第一颗星。</h2><p>让 Agent 使用 Chronicle 记录一段经历，<br>然后刷新这里，连接就会开始生长。</p><button id="empty-refresh" class="primary-button">刷新记忆 ↗</button></div>
+        <div class="scene-bottom"><span><i class="mint-dot"></i> <span id="scene-state">正在载入真实数据</span></span><div class="scene-controls"><button id="rotate" class="control-button" aria-pressed="true" title="切换自动旋转">Ⅱ <span>暂停旋转</span></button><button id="reset" class="control-button" title="恢复默认视角">⌖ <span>复位视角</span></button></div></div>
+        <div class="interaction-hint">拖拽旋转 <span>·</span> 滚轮缩放 <span>·</span> 点击探索</div>
+        <div id="tooltip" class="tooltip hidden"></div>
+      </div>
+      <section class="time-panel" aria-label="记录时间筛选">
+        <div class="time-heading"><div><span class="eyebrow">KNOWLEDGE TIMELINE</span><h2>记忆被记录的时间</h2></div><button id="time-reset" class="time-badge">全部时间 <span>↗</span></button></div>
+        <div class="timeline-track"><div class="timeline-ticks" id="timeline-ticks"></div><input id="time-range" type="range" min="0" max="1000" value="1000" aria-label="按获知时间筛选已加载的记忆版本"></div>
+        <div class="time-labels"><span id="time-start">—</span><span id="time-note">原始经历可以发生在更早的时间</span><span id="time-end">—</span></div>
+      </section>
+    </section>
+    <aside class="inspector" aria-label="节点详情">
+      <div class="inspector-top"><span>记忆透镜</span><span class="mono" id="detail-index">/ 000</span></div>
+      <div id="detail-empty" class="detail-empty"><div class="lens-art">◎</div><h2>靠近一段记忆。</h2><p>点击图中的节点，查看它的完整内容、时间与证据。</p></div>
+      <div id="detail-content" class="detail-content hidden">
+        <div class="detail-type"><span id="detail-kind" class="type-pill"></span><span id="detail-version" class="muted"></span></div>
+        <h2 id="detail-title"></h2>
+        <div class="detail-meta" id="detail-meta"></div>
+        <div class="detail-section"><div class="section-heading" id="content-heading">记忆正文</div><p id="detail-text" class="detail-text"></p></div>
+        <div class="detail-section"><div class="section-heading">关联节点 <span id="detail-link-count">0</span></div><div id="detail-links" class="detail-links"></div></div>
+        <details class="technical-detail"><summary>记录标识与结构 <span>＋</span></summary><pre id="detail-json"></pre></details>
+      </div>
+      <div class="inspector-footer"><span class="shield">◇</span><span>真实记忆 · 来源可追溯<br><small>所有数据保留在这台电脑上</small></span></div>
+    </aside>
+  </main>
+  <div id="announcement" class="sr-only" aria-live="polite"></div>
+</body>
+</html>

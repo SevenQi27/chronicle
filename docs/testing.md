@@ -25,6 +25,7 @@ uv run pytest -q
 | `test_neighbor_regressions.py` | 大量旧版本、关联移除、稳定排序、截断标记和历史视角 |
 | `test_ingest_context.py` | 关键词落空后的实体及近期来源上下文 |
 | `test_mcp.py` | MCP 子进程、通用对象写入、关联查询和客户端配置 |
+| `test_ui.py` | 只读图谱、版本与证据关系、分区隔离、截断及本地 HTTP 访问边界 |
 
 ## 结构化演示
 
