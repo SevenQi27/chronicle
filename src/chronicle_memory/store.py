@@ -37,6 +37,32 @@ RELATIONS = {'related_to':'RELATED_TO','continues':'CONTINUES','contradicts':'CO
              'caused_by':'CAUSED_BY','revises':'REVISES'}
 
 
+# Resolve one logical memory before limiting graph traversal results. For an
+# experience, its latest account may move outside the requested time. For an
+# understanding, corrections replace their root before applicability is tested.
+CURRENT_RECORD = '''
+CALL {
+    WITH m
+    MATCH (m)-[:HAS_REVISION]->(candidate:MemoryRecord)
+    WHERE candidate.record_kind IN ['experience','understanding']
+      AND candidate.seq <= $revision AND candidate.recorded_at <= datetime($known)
+      AND (candidate.record_kind='experience' OR (
+        (candidate.effective_at IS NULL OR candidate.effective_at <= datetime($at))
+        AND NOT EXISTS {
+            MATCH (m)-[:HAS_REVISION]->(newer:MemoryRecord)
+            WHERE newer.root_id=candidate.root_id AND newer.seq>candidate.seq
+              AND newer.seq <= $revision AND newer.recorded_at <= datetime($known)
+        }
+      ))
+    WITH candidate ORDER BY candidate.seq DESC LIMIT 1
+    WITH candidate
+    WHERE (candidate.record_kind<>'experience' OR candidate.effective_at IS NULL OR candidate.effective_at <= datetime($at))
+      AND (candidate.record_kind<>'understanding' OR candidate.valid_to IS NULL OR candidate.valid_to > datetime($at))
+    RETURN candidate AS current
+}
+'''
+
+
 @dataclass(frozen=True)
 class ReadView:
     at: datetime
@@ -491,24 +517,34 @@ class MemoryStore(StateProjection):
         return [r for r in latest.values() if (not r.get('valid_from') or datetime.fromisoformat(r['valid_from'])<=view.at)
                 and (not r.get('valid_to') or view.at<datetime.fromisoformat(r['valid_to']))]
 
+    def _entity_records(self,matching,view,limit,*,record_ids=None,exclude=None,**parameters):
+        return self._run(matching+
+            ' MATCH (e)<-[:INVOLVES]-(previous:Experience)<-[:HAS_REVISION]-(m:Memory {namespace:$ns}) '
+            'WHERE previous.seq<=$revision AND previous.recorded_at<=datetime($known) '
+            'WITH m,collect(DISTINCT e) AS matched_entities '+CURRENT_RECORD+
+            'MATCH (current)-[:INVOLVES]->(entity:Entity) '
+            'WHERE entity IN matched_entities AND ($ids IS NULL OR current.event_id IN $ids) '
+            'AND ($exclude IS NULL OR current.event_id<>$exclude) '
+            'WITH current,entity ORDER BY entity.id '
+            'WITH current,collect(DISTINCT {entity_id:entity.id,name:entity.name}) AS entities '
+            'RETURN current.event_id AS id,current.logical_id AS key,entities '
+            'ORDER BY current.recorded_at DESC,key LIMIT $limit',
+            ns=self.namespace,revision=view.revision,known=stamp(view.known_at),at=stamp(view.at),
+            ids=record_ids,exclude=exclude,limit=limit,**parameters)
+
     def entity_candidates(self,query,view,limit=100,*,record_ids=None,subject=None):
         if record_ids==[]:
             return []
         # Short names require an exact query or explicit subject. English names
         # use word boundaries, so "Ann" does not match "planning".
-        rows=self._run('MATCH (e:Entity {namespace:$ns}) '
+        return self._entity_records('MATCH (e:Entity {namespace:$ns}) '
             'WHERE any(name IN [e.id,e.name]+e.aliases WHERE '
             'toLower(name)=toLower(trim($query)) OR name=$subject OR '
             '(name =~ ".*[一-鿿].*" AND size(name)>=3 AND toLower($query) CONTAINS toLower(name)) OR '
             '(NOT name =~ ".*[一-鿿].*" AND toLower(name) IN $words)) '
-            'AND ($subject IS NULL OR e.id=$subject OR e.name=$subject OR $subject IN e.aliases) '
-            'MATCH (e)<-[:INVOLVES]-(r:Experience) '
-            'WHERE r.namespace=$ns AND r.seq<=$revision AND r.recorded_at<=datetime($known) '
-            'AND ($ids IS NULL OR r.event_id IN $ids) '
-            'RETURN DISTINCT r.event_id AS id,r.logical_id AS key ORDER BY id LIMIT $limit',
-            ns=self.namespace,query=query,subject=subject,words=re.findall(r"[a-z0-9_]+",query.lower()),
-            revision=view.revision,known=stamp(view.known_at),ids=record_ids,limit=limit)
-        return rows
+            'AND ($subject IS NULL OR e.id=$subject OR e.name=$subject OR $subject IN e.aliases)',
+            view,limit,record_ids=record_ids,query=query,subject=subject,
+            words=re.findall(r"[a-z0-9_]+",query.lower()))
 
     def entity_matches(self,query):
         return [r['id'] for r in self.entity_candidates(query,self.capture_view())]
@@ -521,14 +557,17 @@ class MemoryStore(StateProjection):
         if not seed:
             raise ValueError('该时间视角下没有此经历或认识；旧版本请提供对应 known_at')
         links=self.association_views(view=view,memory_keys=[seed['id']])
-        shared=self._run('MATCH (a:MemoryRecord {uid:$uid})-[:INVOLVES]->(e:Entity)<-[:INVOLVES]-(b:MemoryRecord) '
-            'WHERE b.namespace=$ns AND b.seq<=$revision AND b.recorded_at<=datetime($known) '
-            'RETURN DISTINCT b.event_id AS id,b.logical_id AS key,e.id AS entity_id,e.name AS name LIMIT $limit',
-            uid=self._uid(seed['record_id']),ns=self.namespace,revision=view.revision,known=stamp(view.known_at),limit=max(64,limit*8))
-        evidence=self._run('MATCH (a:MemoryRecord {uid:$uid})-[:SUPPORTED_BY]-(b:MemoryRecord) '
-            'WHERE b.namespace=$ns AND b.seq<=$revision AND b.recorded_at<=datetime($known) '
-            'RETURN b.event_id AS id,b.logical_id AS key LIMIT $limit',uid=self._uid(seed['record_id']),
-            ns=self.namespace,revision=view.revision,known=stamp(view.known_at),limit=max(64,limit*8))
+        shared=self._entity_records('MATCH (a:MemoryRecord {uid:$uid})-[:INVOLVES]->(e:Entity)',
+            view,limit+1,exclude=seed['record_id'],uid=self._uid(seed['record_id']))
+        evidence=self._run('MATCH (a:MemoryRecord {uid:$uid})-[:SUPPORTED_BY]-(previous:MemoryRecord)<-[:HAS_REVISION]-(m:Memory {namespace:$ns}) '
+            'WHERE previous.seq<=$revision AND previous.recorded_at<=datetime($known) '
+            'WITH DISTINCT a,m '+CURRENT_RECORD+
+            'WITH a,current WHERE EXISTS { MATCH (a)-[:SUPPORTED_BY]-(current) } '
+            'RETURN current.event_id AS id,current.logical_id AS key '
+            'ORDER BY current.recorded_at DESC,key LIMIT $limit',uid=self._uid(seed['record_id']),
+            ns=self.namespace,revision=view.revision,known=stamp(view.known_at),at=stamp(view.at),limit=limit+1)
+        traversal_truncated=len(shared)>limit or len(evidence)>limit
+        shared=shared[:limit];evidence=evidence[:limit]
         targets={r['key'] for r in shared+evidence}
         for link in links:
             targets.update((link['from_id'],link['to_id']))
@@ -543,11 +582,17 @@ class MemoryStore(StateProjection):
             target=link['to_id'] if link['from_id']==seed['id'] else link['from_id']
             add(by_key.get(target),link['kind'],{k:link.get(k) for k in ('id','basis','explanation','evidence_ids')})
         for row in shared:
-            add(by_id.get(row['id']),'shared_entity',{'entity_id':row['entity_id'],'name':row['name']})
+            for entity in row['entities']:
+                add(by_id.get(row['id']),'shared_entity',entity)
         for row in evidence:
             add(by_id.get(row['id']),'evidence',seed['record_id'])
+        def rank(item):
+            priority=min(2 if r['reason']=='shared_entity' else 1 if r['reason']=='evidence' else 0 for r in item['reasons'])
+            return priority,-datetime.fromisoformat(item['record']['recorded_at']).timestamp(),item['record']['id']
+        ordered=sorted(found.values(),key=rank)
         return {'record_id':seed['record_id'],'at':stamp(view.at),'known_at':stamp(view.known_at),
-                'revision':view.revision,'neighbors':list(found.values())[:limit]}
+                'revision':view.revision,'neighbors':ordered[:limit],
+                'truncated':traversal_truncated or len(ordered)>limit}
 
     def history(self,memory_id=None,entity_id=None,start=None,end=None,known_at=None,limit=30):
         view=self.capture_view(known_at=known_at)
@@ -630,11 +675,27 @@ class MemoryStore(StateProjection):
         rows=self._run('MATCH (r:Review {namespace:$ns}) WHERE r.resolved_at IS NULL RETURN properties(r) AS r ORDER BY r.created_at',ns=self.namespace)
         return [{**_native(row['r']),'body':json.loads(row['r']['body'])} for row in rows]
 
-    def recent_sources(self,conversation_id,before_source,limit=6):
+    def recent_sources(self,conversation_id,before_source,limit=6,*,known_at=None):
         rows=self._run('MATCH (s:EvidenceSource {namespace:$ns,conversation_id:$conversation}) WHERE s.id<>$before '
+                       'AND s.recorded_at<=datetime($known) '
                        'RETURN s.body AS body ORDER BY s.recorded_at DESC LIMIT $limit',
-                       ns=self.namespace,conversation=conversation_id,before=before_source,limit=limit)
+                       ns=self.namespace,conversation=conversation_id,before=before_source,limit=limit,
+                       known=stamp(known_at or self.clock()))
         return list(reversed([json.loads(row['body']) for row in rows]))
+
+    def recent_memory_ids(self,source_ids,view,limit=20):
+        if not source_ids:
+            return []
+        # Follow a bounded set of source IDs, not the namespace's entire history.
+        rows=self._run('UNWIND $uids AS uid MATCH (s:EvidenceSource {uid:uid})<-[:EVIDENCED_BY]-(r:MemoryRecord) '
+            'WHERE r.seq<=$revision AND r.recorded_at<=datetime($known) '
+            'WITH r.logical_id AS key,max(r.seq) AS latest '
+            'ORDER BY latest DESC,key LIMIT $limit '
+            'MATCH (m:Memory {uid:$prefix+key})-[:HAS_REVISION]->(r:MemoryRecord) WHERE r.seq=latest '
+            'RETURN r.event_id AS id ORDER BY latest DESC,key',
+            uids=[self._uid(i) for i in source_ids],prefix=self._uid('memory:'),revision=view.revision,
+            known=stamp(view.known_at),limit=limit)
+        return [r['id'] for r in rows]
 
     def _vector_name(self,model):
         digest=hashlib.sha256((self.namespace+'\0'+model).encode()).hexdigest()[:24]

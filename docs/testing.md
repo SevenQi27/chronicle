@@ -22,6 +22,8 @@ uv run pytest -q
 | `test_cli.py` | 标准输入、文件输入、退出码和 worker 生命周期 |
 | `test_concurrency.py` | 重复提交、版本竞争、提取失败竞争、读取视图和并发检查 |
 | `test_retrieval.py` | 索引候选、短名称匹配、原生向量索引和启动行为 |
+| `test_neighbor_regressions.py` | 大量旧版本、关联移除、稳定排序、截断标记和历史视角 |
+| `test_ingest_context.py` | 关键词落空后的实体及近期来源上下文 |
 | `test_mcp.py` | MCP 子进程、通用对象写入、关联查询和客户端配置 |
 
 ## 结构化演示
