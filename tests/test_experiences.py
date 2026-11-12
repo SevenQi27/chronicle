@@ -155,7 +155,7 @@ async def test_generic_review_resolution_uses_experience_model(scenario):
                 'source_ids':['unclear'],'when':{'precision':'unknown'}}],
         })
         assert result['ok'] and len(result['result']['record_ids'])==1
-        assert s.store.reviews()==[]
+        assert s.store.reviews()['items']==[]
         assert len(s.store.details(result['result']['record_ids'])[0]['sources'])==2
     finally:
         await service.provider.close()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue, StringConstraints, field_validator, model_validator
@@ -18,6 +19,10 @@ def stamp(value: datetime) -> str:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("时间必须带时区")
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+def state_key(subject: str, key: str) -> str:
+    return 'state:v2:'+json.dumps([subject,key],ensure_ascii=False,separators=(',',':'))
 
 
 class Model(BaseModel):
@@ -97,6 +102,13 @@ class Entity(Model):
     name: Text
     category: Text = Field(default="topic", description="开放类别，如人、地点、主题、物品，不限领域")
     aliases: list[Text] = Field(default_factory=list, max_length=20)
+    operation: Literal['mention','correct'] = Field(default='mention',description='mention 复用规范名并追加别名；correct 明确更正规范名、类别和完整别名列表，不改写历史经历正文')
+
+    @model_validator(mode='after')
+    def complete_correction(self):
+        if self.operation=='correct' and not {'category','aliases'}.issubset(self.model_fields_set):
+            raise ValueError('实体 correct 必须明确提交 category 和完整 aliases；空列表表示清除全部别名')
+        return self
 
 
 class Experience(Model):
@@ -225,6 +237,18 @@ class TimelineQuery(Model):
 
 class DetailQuery(Model):
     event_ids: list[Text] = Field(min_length=1, max_length=50)
+    at: AwareDatetime | None = None
+    known_at: AwareDatetime | None = None
+
+
+class PageQuery(Model):
+    limit: int = Field(default=50,ge=1,le=100)
+    offset: int = Field(default=0,ge=0)
+
+
+class ReviewsQuery(PageQuery):
+    kind: Literal['all','candidate','understanding'] = 'all'
+    at: AwareDatetime | None = None
     known_at: AwareDatetime | None = None
 
 

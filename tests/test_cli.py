@@ -90,7 +90,7 @@ def test_worker_is_a_separate_process_and_stops_cleanly(scenario):
         stdout,stderr=process.communicate(timeout=15)
         assert process.returncode==0,stderr
         assert json.loads(stdout.splitlines()[-1])['result']['stopped']
-        assert all(row.get('processed_at') for row in scenario.store.checks())
+        assert all(row.get('processed_at') for row in scenario.store.checks()['items'])
     finally:
         if process.poll() is None:
             process.kill();process.communicate(timeout=5)

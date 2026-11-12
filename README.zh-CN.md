@@ -16,7 +16,7 @@ Agent 可以回忆发生过什么、追溯某项认识的依据，并区分现�
 - **关联回忆**：沿共同人物、主题、显式关联和证据关系找到相关记忆，并返回关联理由。
 - **让认识有据可查**：区分用户明确表达与 Agent 推测，引用支撑它们的具体经历版本。
 - **保留变化历史**：补充信息或纠正错误时生成新版本，保留此前已知的内容。
-- **提示重新审视**：支撑经历被更正后，将相关认识标记为 `needs_review`。
+- **提示重新审视**：引用的经历版本发生变化时，将相关认识标记为 `needs_review`，补充和更正都会触发。它表示需要重新核实，不表示认识已经被判定为错误。
 - **跟踪时间状态**：查询指定时点的事实、规则和计划；计划到期不等于已经完成。
 
 例如，Agent 可以通过同一个人，将“与小林露营遇雨”和“后来收到小林的读书会邀请”关联起来。“与小林相处比具体活动更重要”这项认识必须引用相应经历。之后如果更正经历，旧版本仍会保留，受影响的认识也会提示重新审视。
@@ -104,7 +104,35 @@ uv run chronicle config claude-desktop --env-file /absolute/path/chronicle/.env 
 
 > 使用 Chronicle 保留有背景的经历，区分我的明确表达和你的推测。回答前先回忆相关内容，必要时查看来源；谨慎处理模糊日期和临时感受。回答历史问题时，检索和详情读取使用一致的获知时间截止点。
 
-MCP 初始化信息也包含使用指引。自动存取依赖宿主模型选择调用工具；需要每轮强制采集时，应由宿主生命周期接口触发。
+MCP 初始化信息也包含使用指引。模型主动存取依赖宿主选择调用工具；需要自动采集对话时，启用下面的独立适配器。仅连接 MCP 不会启用自动采集。
+
+## 自动采集对话
+
+采集核心不依赖任何宿主，接收统一的 `CaptureEvent` JSON：`origin`、`turn_id`、`source`（消息 ID、会话 ID、角色、正文、带时区时间），以及可选的 `workspace`、`private` 字段。本地 SQLite 队列先可靠接收，worker 再将每轮对话归档为带版本的经历，保留说话者和原始证据。它**不会把助手回答自动归纳成已核实事实或长期认识**，也不需要额外模型 API。
+
+```sh
+# 任意应用均可提交相同的事件格式。
+uv run chronicle capture submit --input event.json --queue data/capture/events.sqlite3
+uv run chronicle capture worker --namespace personal --queue data/capture/events.sqlite3
+uv run chronicle capture status --queue data/capture/events.sqlite3
+```
+
+`accepted` / `queued` 表示队列已提交，`saved` 才表示 Neo4j 归档已提交。状态提供待处理数量、重试次数、安全错误码及已保存版本 ID。数据库不可用时，事件留在队列并按退避间隔重试；数据库提交成功、队列确认前中断，重放也不会增加重复版本。每个队列只运行一个 worker，由进程锁保证；worker 当前支持 macOS/Linux。持续运行时交给操作系统服务管理器管理；`--once` 处理一批后退出。
+
+### 可选的 Codex 适配器
+
+适配器独立位于 `chronicle_memory.adapters.codex`，通用采集与存储核心不导入它。在仓库环境中安装 hook：
+
+```sh
+uv run python -m chronicle_memory.adapters.codex install \
+  --queue "$(pwd)/data/capture/events.sqlite3"
+```
+
+安装保留现有 hook，在 `~/.codex/hooks.json` 中增加 `UserPromptSubmit`、`Stop`。需在 Codex 的 hook 管理入口审核并信任新定义；安装器不会修改信任哈希或绕过审核。使用相同的绝对队列路径启动 worker，namespace 与 MCP 保持一致；安装 hook 不会自动启动 worker。
+
+适配器先检查会话文件头是否明确标记为用户会话，排除后台、系统及身份不明的会话。桌面端实测使用运行时 `0.167.0-alpha.4.1`。若新聊天首条输入没有通过 `UserPromptSubmit` 到达，`Stop` 可从该会话中补齐**当前轮次、启用时间之后**的类型化 `UserMessage`。不会导入 `response_item` 中注入的指令、推理或其他轮次。这个有限的格式依赖只存在于 Codex 适配器，宿主格式变化后需重新验证。不会回填启用前的旧聊天，继续旧聊天产生的新轮次可以采集。
+
+队列旁的 `.codex.json` 文件记录启用时间；`codex-hooks.jsonl` 只记事件标识和处理结果，不记录正文。显式私密事件、`<private>…</private>` 内容以及支持识别的凭据格式，在入队前排除或脱敏；用户要求不记录某轮时，其后续回答也不归档。禁用两个 Chronicle hook 可停止新采集；停止 worker 只暂停归档，待处理队列保留，两者均不影响 Neo4j 和 MCP。
 
 ## CLI 与 MCP 参考
 
@@ -134,8 +162,9 @@ uv run chronicle recall "露营" --namespace tutorial \
 uv run chronicle state "用户" "偏好"
 uv run chronicle timeline "用户" "偏好"
 uv run chronicle reviews
+uv run chronicle reviews --kind understanding --limit 50 --offset 0
 uv run chronicle resolve REVIEW_ID --input resolution.json
-uv run chronicle checks
+uv run chronicle checks --limit 50 --offset 0
 ```
 
 `--env-file` 和 `--namespace` 可写在子命令前或后。运行前替换大写占位符。解决待确认项时，可以提交补充来源和已明确的记忆；省略记忆内容表示放弃候选。通过 `chronicle tools` 查看工具参数结构，通过 `chronicle COMMAND --help` 查看命令选项。
@@ -151,6 +180,8 @@ uv run chronicle checks
 | `130` | 操作被中断 |
 
 `config`、`tools`、`demo` 和 `--help` 分别输出配置片段、工具定义、演示结果和帮助文本。
+
+`reviews` / `memory_reviews` 和 `checks` 返回含 `items`、`truncated`、`next_offset` 的分页对象，默认 50 条、最多 100 条。此前按裸列表读取的调用方需改为读取 `result.items`。复核项通过 `review_kind` 区分：`candidate` 使用 `memory_resolve_review`；`understanding` 重新核实后用 `memory_write` 更新认识和支撑证据，不能将认识 ID 当作候选 review ID。复核列表支持 `at`、`known_at`，翻阅历史结果时沿用相同时间视角。
 
 ## 记忆模型与写入约定
 
@@ -172,6 +203,10 @@ uv run chronicle checks
 - 显式关联需要解释、依据和证据；存在适用时间时一并填写。
 - 相同内容重试时复用 `source.id`；修改已保存内容时使用新的来源 ID。
 - 精确事实、规则和计划通过 `memory_write.memories` 保存。
+- 实体资料默认 `operation=mention`，保留规范名并追加别名。只有明确更正资料时使用 `operation=correct`，提交完整名称、类别和别名列表。这会修改规范名称查询；历史经历正文中的原始实体描述仍保留。
+- 助手来源可以保存 inferred 认识及关联，不能将二者标为 explicit。
+
+精确状态 ID 使用无歧义的主体/属性编码。旧记录仍按实际 subject/key 字段读取，无需批量重写 ID；更正会核对目标记录的两个字段。
 
 来源、记忆版本、关系和检查项通过 Neo4j 事务提交。处理失败后，已接收的原始消息可用于重试。
 
@@ -185,9 +220,11 @@ Chronicle 区分三类时间：
 | 获知时间 | 服务生成的 `recorded_at` | Chronicle 什么时候知道这件事？ |
 | 适用时间 | `valid_from/valid_to` | 这项认识或关联在什么时间适用？ |
 
-`at` 指定查询的发生或适用时点；`known_at` 将可使用的信息限制在该截止时间之前。例如，11 月收到的更正可以改变现在对 10 月经历的描述，同时保留“10 月时已知什么”的查询视角。检索、上下文与详情读取应使用相同的 `known_at`。
+`at` 指定查询的发生或适用时点；`known_at` 将可使用的信息限制在该截止时间之前。例如，11 月收到的更正可以改变现在对 10 月经历的描述，同时保留“10 月时已知什么”的查询视角。检索、上下文与详情读取应使用相同的 `at` 和 `known_at`（`show --at ... --known-at ...`）。详情会返回证据状态和认识的复核状态。
 
 缺少可排序日期的记忆单独返回在 `memory_history.undated` 中。更正证据后，依赖它的认识会显示相应状态。规则过期后不再适用；计划到期后等待结果证据。适用性在查询时计算，到期检查记录由独立 worker 更新。
+
+历史查询按认识的有效区间、经历的时间区间判断重叠。没有结束时间的 day 按一天处理，exact 按单点处理；缺少范围结束时间不表示事件无限持续。按实体查询历史会包含引用相关经历的认识。关联历史保留旧版本，并返回 `superseded`、`current_version_id`；关联数量也计入截断标记。
 
 ### 运行到期检查
 
@@ -202,12 +239,16 @@ worker 每批最多处理 100 项检查，批次之间释放写锁，有积压�
 
 CLI 查询和 MCP 服务不会启动 worker。多个 worker 共用 namespace 时，通过数据库锁和已处理标记协调。
 
+检查结果为 conflict 且已处理，表示这次检查执行过，不表示冲突已解决；不会反复将同一检查重新入队，状态与上下文查询仍会返回冲突。upcoming 也会包含已生效、到期日在未来的未完成计划。
+
 ## 检索、并发与可选模型
 
 检索先融合全文候选、实体匹配和可选 Neo4j 向量检索，再读取候选的历史与证据。结果返回 `candidate_count` 和 `candidate_budget`。单段记忆的版本或证据较多时，仍可能增加读取成本。
 
 - 人物和证据邻居先解析查询视角下的有效版本，再按逻辑记忆排序和限量。`neighbors.truncated` 和 `recall.related_truncated` 表示未完全展开。
-- 向量索引按 namespace 和模型分别建立。近似检索有候选预算，时间筛选可能减少结果；查询指定对象历史时使用 `history`。
+- 证据邻居会跨版本追溯同一逻辑经历，同时保留实际引用的版本 ID，不会将旧认识的证据边擅自移到新版。待复核认识出现在关联上下文、attention 和 `reviews --kind understanding` 中。
+- 向量索引按 namespace 和模型分别建立，保留历史版本；召回按逻辑记忆去重并在预算内扩大候选窗口，预算耗尽时返回说明。选定的当前版本单独评分，避免旧版本占据其评分名额；查询指定对象历史时使用 `history`。
+- 仅通过其他版本找到的经历或认识会返回 `match_scope=historical`、`matched_record_ids`。正文仍是查询时间视角下选定的版本，旧命中只作为回忆线索，不能当作当前事实；精确状态仍要求其选定状态的证据匹配查询。
 - 中文关键词使用二字切分。短实体名称使用精确名称查询或显式 `--subject`，避免普通问句中的子串被误当成人名。
 - 同一 namespace 的写事务通过 Neo4j 锁串行化。过期版本更新会返回冲突，不自动合并不同 Agent 的修改。
 - 一次检索固定提交序号和时间视角。数据库操作在线程中执行，关闭时等待已开始的操作结束。
@@ -222,7 +263,7 @@ uv run chronicle ingest --input source.json
 uv run chronicle reindex
 ```
 
-宿主 Agent 自行提取时，直接通过 `remember` 写入，无需独立提取模型。模型服务故障时保留已提交记忆，检索返回降级说明。独立提取器未命中关键词时，会补充实体关联和同一会话近期来源对应的结构化记录，合计最多 20 条，使用一致的读取视角。
+宿主 Agent 自行提取时，直接通过 `remember` 写入，无需独立提取模型。模型服务故障时保留已提交记忆，检索返回降级说明。独立提取器合并关键词、实体与同会话来源，按逻辑记忆去重，最多 20 条；使用一致读取视角和最新可写版本 ID，包括未来才适用的版本。长全文查询按 Lucene 安全子句数量分批，保留完整来源。上下文检索异常也纳入提取失败处理，可用同一来源 ID 重试。
 
 ## 运行与当前边界
 
@@ -238,6 +279,8 @@ Neo4j 使用数据库账号认证，连接凭据保存在 `.env`。namespace 用
 宿主模型负责理解经历和形成认识。定期自主总结、长期压缩与遗忘、自动实体消歧尚未实现，大规模性能尚未得到验证。CLI 帮助、部分诊断信息和详细测试指南目前仍使用中文。
 
 ## 开发
+
+更新已有安装后，运行 `uv run chronicle init` 补充状态身份索引与关联属性索引；操作幂等并保留数据。已连接的 MCP 需重新加载，以使用新的工具参数和实现。
 
 实现位于 [`src/chronicle_memory/`](src/chronicle_memory/)：
 

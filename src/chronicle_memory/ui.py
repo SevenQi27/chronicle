@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 from neo4j.exceptions import DriverError, Neo4jError
 
 from .errors import error_result
-from .models import stamp
+from .models import stamp, state_key
 from .store import MemoryStore
 
 
@@ -25,8 +25,9 @@ def graph_snapshot(store, limit=200):
     nodes={}; latest={}; uids=[]
     for item in rows:
         r=item['r']; payload=json.loads(r['body']); uid=r['uid']; uids.append(uid)
-        latest.setdefault(r['logical_id'],uid)
-        nodes[uid]={'id':uid,'record_id':r['event_id'],'logical_id':r['logical_id'],
+        logical=state_key(r['subject'],r['key']) if r['record_kind']=='state' else r['logical_id']
+        latest.setdefault(logical,uid)
+        nodes[uid]={'id':uid,'record_id':r['event_id'],'logical_id':logical,
             'kind':r['record_kind'],'title':payload.get('title') or f"{payload.get('subject','')} · {payload.get('key','')}",
             'text':r['text'],'recorded_at':stamp(r['recorded_at'].to_native()),
             'payload':payload}

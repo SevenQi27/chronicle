@@ -2,7 +2,7 @@
 import json
 from collections import defaultdict
 from datetime import datetime
-from .models import stamp
+from .models import stamp, state_key
 
 
 class StateProjection:
@@ -63,7 +63,7 @@ class StateProjection:
 
     def state(self, subject: str, key: str, at=None, known_at=None,*,view=None):
         return next((s for s in self.states(at=at, known_at=known_at, subject=subject,view=view,
-                    logical_ids=['state:'+subject+':'+key]) if s["key"]==key),
+                    logical_ids=[state_key(subject,key)]) if s["key"]==key),
                     {"subject":subject,"key":key,"status":"unknown","candidates":[]})
 
     def timeline(self, subject: str, key: str, known_at=None):

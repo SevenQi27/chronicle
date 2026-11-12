@@ -16,7 +16,7 @@ This English README is the primary documentation. The Chinese version is maintai
 - **Connects memories.** Recall through shared people and topics, explicit associations, and evidence links, with reasons for each connection.
 - **Grounds understandings in evidence.** Separate explicit user statements from agent inferences and link both to supporting experience versions.
 - **Keeps revisions.** Add new information or correct an earlier account without losing the history of what was known.
-- **Flags changed evidence.** Mark dependent understandings as `needs_review` when their supporting experiences are corrected.
+- **Flags changed evidence.** Mark dependent understandings as `needs_review` when a referenced experience version changes, including both additions and corrections. This requests re-evaluation; it does not declare the understanding false.
 - **Tracks temporal state.** Query facts, rules, and plans at a chosen time; a plan becoming due does not mean it was completed.
 
 For example, an agent can connect a rainy camping trip with Lin to a later book-club invitation through the same person. An understanding such as “spending time with Lin matters more than the activity” must cite the experience that supports it. A later correction preserves the old account and makes affected understandings available for review.
@@ -104,7 +104,35 @@ A useful host instruction is:
 
 > Use Chronicle to retain experiences with their context. Distinguish my explicit statements from your inferences. Recall related memories before answering and inspect sources when needed. Treat uncertain dates and temporary feelings carefully. When answering historical questions, use the same knowledge cutoff for retrieval and detail reads.
 
-MCP initialization also supplies usage guidance. Automatic storage and recall depend on the host model choosing to call tools. If every turn must be captured, invoke Chronicle from the host's lifecycle hooks.
+MCP initialization also supplies usage guidance. Model-initiated storage and recall depend on the host choosing to call tools. For automatic conversation capture, enable the separate adapter below; connecting MCP alone does not enable capture.
+
+## Automatic conversation capture
+
+The capture core is host-neutral. It accepts `CaptureEvent` JSON containing `origin`, `turn_id`, a `source` (ID, conversation ID, role, content, timezone-aware timestamp), and optional `workspace`/`private` fields. A local SQLite outbox acknowledges receipt before Neo4j processing. A worker archives each turn as a versioned conversation experience, with original speakers and evidence retained. It does **not** automatically turn assistant answers into verified facts or inferred understandings, and needs no additional model API.
+
+```sh
+# Any application can submit the same event format.
+uv run chronicle capture submit --input event.json --queue data/capture/events.sqlite3
+uv run chronicle capture worker --namespace personal --queue data/capture/events.sqlite3
+uv run chronicle capture status --queue data/capture/events.sqlite3
+```
+
+`accepted`/`queued` means the outbox committed the event; `saved` means the Neo4j archive committed. Status includes pending counts, retry attempts, safe error codes, and saved record IDs. A database outage leaves events queued with bounded backoff. Replay after a commit-before-acknowledgment failure does not create another revision. Run only one worker per queue (enforced with a process lock); the worker currently supports macOS/Linux. For unattended capture, manage it with your OS service manager. `--once` processes one batch and exits.
+
+### Optional Codex adapter
+
+The adapter lives in `chronicle_memory.adapters.codex`; the capture/storage core never imports it. Install hooks from the repository environment:
+
+```sh
+uv run python -m chronicle_memory.adapters.codex install \
+  --queue "$(pwd)/data/capture/events.sqlite3"
+```
+
+This preserves existing hooks and adds `UserPromptSubmit` and `Stop` handlers to `~/.codex/hooks.json`. Review and trust the new definitions in Codex's hook controls; the installer does not modify trust hashes or bypass trust. Start the capture worker with the same absolute queue path and the same namespace as MCP. Installing hooks does not start the worker.
+
+The adapter verifies a user-session transcript header before accepting an event, excluding background/system sessions and unidentified sessions. Desktop validation used runtime `0.167.0-alpha.4.1`. If a new chat's first prompt is absent from `UserPromptSubmit`, `Stop` can recover only typed `UserMessage` items from that same turn, after the activation timestamp. It never imports injected `response_item` instructions, reasoning, or other turns. This narrow transcript-format dependency stays inside the Codex adapter and must be revalidated after host format changes. Existing pre-activation chats are not backfilled; continuing them creates new capturable turns.
+
+The queue's `.codex.json` companion records activation time. `codex-hooks.jsonl` records event IDs and outcomes without message bodies. Explicit private events, `<private>…</private>` text, and supported credential patterns are excluded or redacted before queuing. A user request not to record a turn suppresses its subsequent answer. Disabling the two Chronicle hooks stops new capture; stopping the worker only pauses archiving, preserving pending events. Neither affects Neo4j or MCP availability.
 
 ## CLI and MCP reference
 
@@ -134,8 +162,9 @@ uv run chronicle recall "camping" --namespace tutorial \
 uv run chronicle state "user" "preference"
 uv run chronicle timeline "user" "preference"
 uv run chronicle reviews
+uv run chronicle reviews --kind understanding --limit 50 --offset 0
 uv run chronicle resolve REVIEW_ID --input resolution.json
-uv run chronicle checks
+uv run chronicle checks --limit 50 --offset 0
 ```
 
 `--env-file` and `--namespace` can appear before or after the subcommand. Replace uppercase placeholders before running commands. A review resolution can supply additional evidence and clarified memories; omitting the memory content discards the candidate. Use `chronicle tools` for tool schemas and `chronicle COMMAND --help` for command options.
@@ -151,6 +180,8 @@ Success: `{"ok": true, "result": ...}`. Failure: `{"ok": false, "error": {"code"
 | `130` | Interrupted |
 
 `config`, `tools`, `demo`, and `--help` output configuration snippets, tool definitions, demo results, and help respectively.
+
+`reviews` / `memory_reviews` and `checks` return a page with `items`, `truncated`, and `next_offset` (default 50, maximum 100). Earlier clients expecting a bare list must read `result.items`. Review entries have a `review_kind`: resolve a `candidate` with `memory_resolve_review`; re-evaluate an `understanding` and update its statement/supports with `memory_write`. An understanding's ID is not a candidate review ID. Reviews accept `at` and `known_at`; keep the same time cutoffs when paging historical results.
 
 ## Memory model and write contract
 
@@ -172,6 +203,10 @@ A `Memory` node holds the stable logical identity; `HAS_REVISION` connects its v
 - Explicit associations require an explanation, basis, and evidence; use validity times when applicable.
 - Reuse `source.id` for retries of the same payload. Use a new source ID when changing saved content.
 - Store exact facts, rules, and plans in `memory_write.memories`.
+- Entity metadata defaults to `operation=mention`: reuse the canonical name and add aliases. Use `operation=correct` only for an explicit metadata correction, supplying the complete name, category, and alias list. This changes canonical lookup names; original entity descriptions remain in historical experience payloads.
+- Assistant sources may create inferred understandings and associations, but cannot mark either as `explicit`.
+
+Exact-state IDs encode the subject/key pair without ambiguous delimiters. Existing state records remain readable by their stored subject/key fields; no bulk ID rewrite is required. Corrections validate both fields against the target record.
 
 Sources, memory revisions, relationships, and checks are committed through Neo4j transactions. Accepted raw messages remain available for retry after a failed processing attempt.
 
@@ -185,9 +220,11 @@ Chronicle distinguishes three kinds of time:
 | Knowledge time | Service-generated `recorded_at` | When did Chronicle learn it? |
 | Validity time | `valid_from/valid_to` | When does this understanding or association apply? |
 
-`at` selects the event or validity time being queried. `known_at` limits the information available to what had been recorded by that cutoff. For example, a correction recorded in November can change today's account of an October event while leaving an October knowledge view intact. Use the same `known_at` for search/context and detail reads.
+`at` selects the event or validity time being queried. `known_at` limits the information available to what had been recorded by that cutoff. For example, a correction recorded in November can change today's account of an October event while leaving an October knowledge view intact. Use the same `at` and `known_at` for search/context and detail reads (`show --at ... --known-at ...`). Details include evidence status and the understanding's review state.
 
 Undated memories are returned separately in `memory_history.undated`. Corrected evidence is surfaced in the status of dependent understandings. Expired rules stop applying; due plans await outcome evidence. Applicability is computed at query time, while a separate worker records due checks.
+
+History filters overlap understanding validity intervals and experience intervals. A `day` without an end spans one day; an exact time without an end is a point. A missing range end does not imply an indefinitely continuing event. Entity history includes understandings citing that entity's experiences. Association history retains earlier versions with `superseded` and `current_version_id`; truncation also accounts for associations.
 
 ### Run due checks
 
@@ -202,12 +239,16 @@ The worker processes up to 100 checks per batch, releases the write lock between
 
 CLI queries and the MCP server do not start a worker. Multiple workers in the same namespace coordinate through database locks and processed markers.
 
+A processed check with outcome `conflict` means the check ran, not that the conflict was resolved. It is not repeatedly requeued; state/context queries continue to expose the unresolved conflict. Upcoming context includes currently open plans with future due dates, not just records that become effective in the future.
+
 ## Retrieval, concurrency, and optional models
 
 Retrieval combines full-text candidates, entity matches, and optional Neo4j vector search before loading candidate histories and evidence. Results expose `candidate_count` and `candidate_budget`. Large revision or evidence histories can still increase read cost.
 
 - Entity/evidence neighbors resolve the visible revision before sorting and limiting logical memories. `neighbors.truncated` and `recall.related_truncated` signal incomplete expansion.
-- Vector indexes are separated by namespace and model. Approximate retrieval has a candidate budget; temporal filtering can reduce the result count. Use `history` for a specific object's history.
+- Evidence neighbors follow the logical experience across revisions while retaining the exact cited version IDs. Replacing an experience does not silently reattach an understanding to new evidence. Pending understandings appear in related context/attention and in `reviews --kind understanding`.
+- Vector indexes are separated by namespace and model and retain historical versions. Retrieval deduplicates logical memories and expands the candidate window within a bounded budget; an exhausted window produces a warning. Current candidate versions are scored separately so old versions do not consume their scoring slots. Use `history` for a specific object's history.
+- An episode or understanding found only through another version has `match_scope=historical` and `matched_record_ids`. The returned narrative is the version selected for the query's time view; the matched version is a recall cue, not a claim that its old content is still true. Exact-state answers still require a match against their selected state evidence.
 - Chinese keyword retrieval uses bigrams. For short entity names, use an exact-name query or explicit `--subject` to avoid incidental substring matches.
 - Writes within a namespace are serialized with Neo4j locks. Stale revisions produce conflicts; different agents' edits are not automatically merged.
 - A retrieval fixes a commit sequence and temporal view for its reads. Database operations run in threads, and shutdown waits for started operations to finish.
@@ -222,7 +263,7 @@ uv run chronicle ingest --input source.json
 uv run chronicle reindex
 ```
 
-When the host agent extracts memories, write them directly with `remember`; a separate extraction model is unnecessary. Model-service failures preserve committed memories, and retrieval reports degradation warnings. If extraction finds no keyword matches, it supplements context with up to 20 structured records from entity links and recent sources in the same conversation, using the same read view.
+When the host agent extracts memories, write them directly with `remember`; a separate extraction model is unnecessary. Model-service failures preserve committed memories, and retrieval reports degradation warnings. Standalone extraction merges keywords, entity matches, and recent conversation sources into at most 20 distinct logical memories, using one read view and their latest writable record IDs (including future-effective versions). Long full-text queries are split into Lucene-safe chunks without discarding the source. Context-retrieval failures are included in ingest failure handling and can be retried with the same source ID.
 
 ## Operations and current scope
 
@@ -238,6 +279,8 @@ Neo4j authenticates database accounts; `.env` holds the connection credentials. 
 The host model is responsible for interpreting experiences and forming understandings. Periodic autonomous synthesis, long-term compression/forgetting, and automatic entity disambiguation are not implemented. Large-scale performance has not been established. CLI help, some diagnostics, and the detailed testing guide currently remain in Chinese.
 
 ## Development
+
+After updating an existing installation, run `uv run chronicle init` to add the state-identity and relationship-property indexes. This is idempotent and preserves data. Reload existing MCP connections to load the new tool schemas and implementation.
 
 Implementation lives in [`src/chronicle_memory/`](src/chronicle_memory/):
 

@@ -52,7 +52,7 @@ def test_future_rule_and_expiry_do_not_depend_on_worker(scenario):
     assert s.state(at=9,key="price")["memory"]["value"]==100
     assert s.state(at=10,key="price")["memory"]["value"]==150
     assert s.state(at=20,key="price")["status"]=="expired"
-    assert not any(c.get("processed_at") for c in s.store.checks())
+    assert not any(c.get("processed_at") for c in s.store.checks()['items'])
 
 
 def test_plan_is_not_completed_by_time_and_tick_is_idempotent(scenario):
@@ -143,7 +143,7 @@ def test_batch_rollback_keeps_raw_source_but_no_partial_facts(scenario):
         s.store.apply(source,Extraction(memories=[good,bad]))
     assert s.store.source("batch") is not None
     assert s.state()["status"]=="unknown"
-    assert s.store.checks()==[]
+    assert s.store.checks()['items']==[]
     s.store.apply(source,Extraction(memories=[good]))
     assert s.state()["status"]=="active"
 
@@ -189,7 +189,7 @@ def test_review_resolution_is_atomic_and_linked(scenario):
     confirmation=Source(id="clear",content="确认从今天起李四负责",occurred_at=s.now)
     change=MemoryChange(subject="项目 A",key="owner",kind="fact",text=confirmation.content,value="李四",effective_at=s.now)
     s.store.apply(confirmation,Extraction(memories=[change]),review_id=rid)
-    assert s.store.reviews()==[]
+    assert s.store.reviews()['items']==[]
     assert s.state()["memory"]["value"]=="李四"
     assert s.store.details([s.state()["memory"]["event_id"]])[0]["source"]["id"]=="clear"
 

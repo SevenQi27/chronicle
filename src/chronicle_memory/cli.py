@@ -4,6 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 import signal
+import sqlite3
 import sys
 import time
 
@@ -13,6 +14,7 @@ from . import __version__
 from .config import Settings
 from .errors import EXIT_CODES,NotInitializedError,error_result
 from .provider import ProviderError
+from .models import PageQuery
 from .service import MemoryService
 from .store import MemoryStore
 from .tools import MemoryTools
@@ -36,15 +38,28 @@ def parser():
     sub=root.add_subparsers(dest='command',required=True)
     for name,help_text in [('demo','运行独立分区的结构化演示'),('tools','输出 MCP 工具定义'),
                            ('check','检查连接与配置'),('tick','处理一次到期检查'),
-                           ('checks','查看检查记录'),('reindex','建立或补齐 Neo4j 向量索引'),
-                           ('mcp','启动 stdio MCP 服务'),('now','读取当前时间'),('reviews','列出待确认内容')]:
+                           ('reindex','建立或补齐 Neo4j 向量索引'),
+                           ('mcp','启动 stdio MCP 服务'),('now','读取当前时间')]:
         sub.add_parser(name,help=help_text,parents=[shared])
+    for name in ('checks','reviews'):
+        page=sub.add_parser(name,help='分页查看检查记录' if name=='checks' else '分页查看候选和待复核认识',parents=[shared])
+        page.add_argument('--limit',type=int,default=50)
+        page.add_argument('--offset',type=int,default=0)
+        if name=='reviews':
+            page.add_argument('--kind',choices=['all','candidate','understanding'],default='all')
+            page.add_argument('--at');page.add_argument('--known-at')
     init=sub.add_parser('init',help='显式初始化约束和索引',parents=[shared])
     init.add_argument('--wait',type=float,default=30,help='等待数据库就绪的秒数')
     worker=sub.add_parser('worker',help='持续处理时间检查，支持 SIGINT/SIGTERM 停止',parents=[shared])
     worker.add_argument('--interval',type=float)
     ui=sub.add_parser('ui',help='启动本地只读 3D 记忆观测台',parents=[shared])
     ui.add_argument('--port',type=int,default=8765)
+    capture=sub.add_parser('capture',help='通用对话采集队列：提交、后台归档和查看状态',parents=[shared])
+    capture.add_argument('action',choices=['submit','worker','status'])
+    capture.add_argument('--queue',type=Path,default=Path('data/capture/events.sqlite3'))
+    capture.add_argument('--input',default='-')
+    capture.add_argument('--interval',type=float,default=2)
+    capture.add_argument('--once',action='store_true')
     config=sub.add_parser('config',help='打印客户端配置片段',parents=[shared])
     config.add_argument('agent',choices=['codex','claude','claude-desktop'])
     for name in ('remember','ingest','resolve'):
@@ -63,6 +78,7 @@ def parser():
         command.add_argument('--interpret-time',action='store_true')
     show=sub.add_parser('show',help='批量读取记忆与证据',parents=[shared])
     show.add_argument('event_ids',nargs='+')
+    show.add_argument('--at')
     show.add_argument('--known-at')
     history=sub.add_parser('history',help='按记忆或实体查询历史',parents=[shared])
     for option in ('memory-id','entity-id','start','end','known-at'):
@@ -85,12 +101,12 @@ COMMANDS={
     'remember':('memory_write',()),'ingest':('memory_ingest',()),'resolve':('memory_resolve_review',()),
     'recall':('memory_context',('query','subject','at','known_at','limit','include_inactive','interpret_time')),
     'search':('memory_search',('query','subject','at','known_at','limit','include_inactive','interpret_time')),
-    'show':('memory_details',('event_ids','known_at')),
+    'show':('memory_details',('event_ids','at','known_at')),
     'history':('memory_history',('memory_id','entity_id','start','end','known_at','limit')),
     'neighbors':('memory_neighbors',('record_id','at','known_at','limit')),
     'state':('memory_state',('subject','key','at','known_at')),
     'timeline':('memory_timeline',('subject','key','known_at')),
-    'now':('memory_now',()),'reviews':('memory_reviews',()),'tick':('memory_tick',()),
+    'now':('memory_now',()),'reviews':('memory_reviews',('kind','limit','offset','at','known_at')),'tick':('memory_tick',()),
 }
 
 
@@ -140,7 +156,8 @@ async def run(args,settings):
         if args.command=='reindex':
             return {'ok':True,'result':await service.reindex()}
         if args.command=='checks':
-            return {'ok':True,'result':await service.database(service.store.checks)}
+            page=PageQuery(limit=args.limit,offset=args.offset)
+            return {'ok':True,'result':await service.database(service.store.checks,**page.model_dump())}
         if args.command=='check':
             return {'ok':True,'result':{'backend':'Neo4j','connected':True,'database':settings.neo4j_database,
                 'namespace':settings.namespace,'timezone':settings.timezone,'chat_model':settings.model or None,
@@ -187,6 +204,17 @@ def main():
             raise ValueError('MCP --env-file 必须是绝对路径')
         settings=Settings.from_env(env_file)
         if hasattr(args,'namespace'):settings.namespace=args.namespace
+        if args.command=='capture':
+            from .capture import CaptureEvent,CaptureQueue,run_worker
+            queue=CaptureQueue(args.queue)
+            if args.action=='submit':
+                value=json.load(sys.stdin) if args.input=='-' else json.loads(Path(args.input).read_text())
+                result=queue.submit(CaptureEvent.model_validate(value))
+            elif args.action=='status':
+                result=queue.status()
+            else:
+                result=run_worker(queue,settings,args.interval,args.once)
+            emit({'ok':True,'result':result});return
         if args.command=='ui':
             from .ui import serve
             serve(settings,args.port)
@@ -196,7 +224,7 @@ def main():
             run_demo(settings);return
         result=asyncio.run(run(args,settings))
         if result is None:return
-    except (ValueError,OSError,ProviderError,NotInitializedError,DriverError,Neo4jError) as error:
+    except (ValueError,OSError,sqlite3.Error,ProviderError,NotInitializedError,DriverError,Neo4jError) as error:
         result=error_result(error)
     except KeyboardInterrupt:
         result={'ok':False,'error':{'code':'interrupted','message':'操作已中断'}}

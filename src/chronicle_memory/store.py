@@ -11,13 +11,17 @@ from uuid import NAMESPACE_URL, uuid5
 from neo4j import GraphDatabase
 
 from .config import Settings
-from .models import Extraction, Source, stamp, utcnow
+from .models import Extraction, Source, stamp, utcnow, state_key
 from .state_projection import StateProjection
 from .errors import ConflictError, NotInitializedError
 
 
 def _json(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False)
+
+
+def _utc_iso(value):
+    return stamp(datetime.fromisoformat(value)) if value is not None else None
 
 
 def tokens(text):
@@ -35,6 +39,13 @@ def _native(row):
 
 RELATIONS = {'related_to':'RELATED_TO','continues':'CONTINUES','contradicts':'CONTRADICTS',
              'caused_by':'CAUSED_BY','revises':'REVISES'}
+
+# Each branch can use its relationship-property index; an untyped relationship
+# MATCH scans every relationship, even when namespace and logical_id are given.
+ASSOCIATION_LOOKUP = 'CALL { '+ ' UNION ALL '.join(
+    f'MATCH ()-[r:{kind}]->() WHERE r.namespace=$ns AND r.logical_id=$id '
+    'AND r.category="association" RETURN r' for kind in RELATIONS.values()
+)+' } RETURN r.id AS id ORDER BY r.seq DESC LIMIT 1'
 
 
 # Resolve one logical memory before limiting graph traversal results. For an
@@ -57,7 +68,7 @@ CALL {
     WITH candidate ORDER BY candidate.seq DESC LIMIT 1
     WITH candidate
     WHERE (candidate.record_kind<>'experience' OR candidate.effective_at IS NULL OR candidate.effective_at <= datetime($at))
-      AND (candidate.record_kind<>'understanding' OR candidate.valid_to IS NULL OR candidate.valid_to > datetime($at))
+      AND (candidate.record_kind<>'understanding' OR candidate.valid_to IS NULL OR datetime({datetime:candidate.valid_to,timezone:'+00:00'}) > datetime($at))
     RETURN candidate AS current
 }
 '''
@@ -102,6 +113,10 @@ class MemoryStore(StateProjection):
         self._run('CREATE FULLTEXT INDEX chronicle_text IF NOT EXISTS FOR (n:MemoryRecord) ON EACH [n.search_terms]')
         self._run('CREATE INDEX chronicle_entity_name IF NOT EXISTS FOR (n:Entity) ON (n.namespace,n.name)')
         self._run('CREATE INDEX chronicle_experience_time IF NOT EXISTS FOR (n:Experience) ON (n.namespace,n.occurred_start)')
+        self._run('CREATE INDEX chronicle_state_identity IF NOT EXISTS FOR (n:MemoryRecord) ON (n.namespace,n.subject,n.key)')
+        self._run('CREATE INDEX chronicle_memory_kind IF NOT EXISTS FOR (n:Memory) ON (n.namespace,n.kind)')
+        for kind in RELATIONS.values():
+            self._run(f'CREATE INDEX chronicle_association_{kind.lower()} IF NOT EXISTS FOR ()-[r:{kind}]-() ON (r.namespace,r.logical_id)')
         self._run('CALL db.awaitIndexes(30)')
         self._run('MERGE (s:ChronicleSchema {name:"chronicle"}) SET s.version=1')
         return {'initialized':True,'schema_version':1}
@@ -180,9 +195,9 @@ class MemoryStore(StateProjection):
                    'CREATE (m)-[:HAS_REVISION]->(r) RETURN properties(r) AS r',
                    props={**record,'uid':self._uid(record['event_id']),'namespace':self.namespace,'logical_id':logical_id},
                    known=record['recorded_at'],effective=record.get('effective_at'),
-                   start=when.get('start'),end=when.get('end'),
-                   valid_from=payload.get('valid_from',payload.get('effective_at')),
-                   valid_to=payload.get('valid_to',payload.get('expires_at')),
+                   start=_utc_iso(when.get('start')),end=_utc_iso(when.get('end')),
+                   valid_from=_utc_iso(payload.get('valid_from',payload.get('effective_at'))),
+                   valid_to=_utc_iso(payload.get('valid_to',payload.get('expires_at'))),
                    precision=when.get('precision'),description=when.get('description'),
                    mid=self._uid('memory:'+logical_id),logical=logical_id,ns=self.namespace,kind=record['record_kind']).single()
         for source_id in dict.fromkeys(source_ids):
@@ -228,18 +243,20 @@ class MemoryStore(StateProjection):
         ids=[]
         for index,change in enumerate(changes):
             eid=self._id(f'source:{source.id}:memory:{index}')
-            logical='state:'+change.subject+':'+change.key
-            previous=tx.run('MATCH (m:Memory {uid:$uid})-[:HAS_REVISION]->(r) RETURN r.body AS body LIMIT 1',
-                            uid=self._uid('memory:'+logical)).single()
+            logical=state_key(change.subject,change.key)
+            previous=tx.run('MATCH (r:MemoryRecord {namespace:$ns,subject:$subject,key:$key}) '
+                            'WHERE r.record_kind="state" RETURN r.body AS body LIMIT 1',
+                            ns=self.namespace,subject=change.subject,key=change.key).single()
             if previous and json.loads(previous['body'])['kind']!=change.kind:
                 raise ValueError('同一主体和属性不能混用事实、规则与计划；请使用不同 key')
             root=eid
             if change.operation=='correct':
                 target=self._resolve(tx,change.corrects,{})
-                if target['logical_id']!=logical:
+                if target['record_kind']!='state' or (target['subject'],target['key'])!=(change.subject,change.key):
                     raise ValueError('corrects 未找到匹配的主体、属性和分区')
-                latest=tx.run('MATCH (r:MemoryRecord {namespace:$ns,root_id:$root}) RETURN r.event_id AS id ORDER BY r.seq DESC LIMIT 1',
-                              ns=self.namespace,root=target['root_id']).single()
+                latest=tx.run('MATCH (r:MemoryRecord {namespace:$ns,subject:$subject,key:$key,root_id:$root}) '
+                              'RETURN r.event_id AS id ORDER BY r.seq DESC LIMIT 1',
+                              ns=self.namespace,subject=change.subject,key=change.key,root=target['root_id']).single()
                 if latest['id']!=change.corrects:
                     raise ConflictError('version_conflict','纠错目标已被更正，请读取最新 event_id 后再提交',current_record_id=latest['id'])
                 root=target['root_id']
@@ -295,6 +312,10 @@ class MemoryStore(StateProjection):
                                'MERGE (r)-[:INVOLVES]->(e)',rid=self._uid(eid),uid=self._uid('entity:'+entity.id),
                                ns=self.namespace,id=entity.id,name=entity.name,category=entity.category,
                                aliases=entity.aliases,now=now).consume()
+                        if entity.operation=='correct':
+                            tx.run('MATCH (e:Entity {uid:$uid}) SET e.name=$name,e.category=$category,e.aliases=$aliases',
+                                   uid=self._uid('entity:'+entity.id),name=entity.name,category=entity.category,
+                                   aliases=entity.aliases).consume()
                 else:
                     for ref in item.supports:
                         support=self._resolve(tx,ref,local)
@@ -306,8 +327,7 @@ class MemoryStore(StateProjection):
                         self._check(tx,eid,trigger,when)
         association_ids=[]
         for item in extraction.associations:
-            previous=tx.run('MATCH ()-[r]->() WHERE r.category="association" AND r.namespace=$ns AND r.logical_id=$id '
-                            'RETURN r.id AS id ORDER BY r.seq DESC LIMIT 1',ns=self.namespace,id=item.id).single()
+            previous=tx.run(ASSOCIATION_LOOKUP,ns=self.namespace,id=item.id).single()
             if (previous and previous['id']!=item.replaces) or (not previous and item.replaces):
                 raise ConflictError('version_conflict','更新关联需要 replaces 指向其最新 association_version_id',
                                     current_record_id=previous['id'] if previous else None)
@@ -344,12 +364,15 @@ class MemoryStore(StateProjection):
         self.receive(source)
         fingerprint=_json({'extraction':extraction.model_dump(mode='json'),'review_id':review_id})
         if source.role=='assistant' and (extraction.memories or extraction.experiences or
-                                       any(u.basis=='explicit' for u in extraction.understandings)):
+                                       any(u.basis=='explicit' for u in extraction.understandings) or
+                                       any(a.basis=='explicit' for a in extraction.associations)):
             raise ValueError('助手复述不能成为新事实或经历；可以引用真实经历保存明确标注 inferred 的认识')
         def write(tx):
             receipt=tx.run('MATCH (s:EvidenceSource {uid:$uid}) RETURN properties(s) AS s',uid=self._uid(source.id)).single()['s']
             if receipt['status']=='applied':
-                if receipt.get('extraction')!=fingerprint:
+                saved=json.loads(receipt['extraction'])
+                saved['extraction']=Extraction.model_validate(saved['extraction']).model_dump(mode='json')
+                if _json(saved)!=fingerprint:
                     raise ConflictError('source_conflict','该 source.id 已应用另一份提取结果；修改记忆请使用新的来源 ID',source_id=source.id)
                 return json.loads(receipt['result'])
             now=stamp(self.clock())
@@ -381,10 +404,24 @@ class MemoryStore(StateProjection):
             return []
         if revision is None:
             revision=self.capture_view(known_at=known_at).revision
+        identities=[];generic=[]
+        for key in dict.fromkeys(logical_ids or []):
+            if key.startswith('state:v2:'):
+                try:
+                    pair=json.loads(key[len('state:v2:'):])
+                except json.JSONDecodeError:
+                    pair=None
+                if isinstance(pair,list) and len(pair)==2 and all(isinstance(v,str) for v in pair):
+                    identities.append({'subject':pair[0],'key':pair[1]});continue
+            generic.append(key)
         if logical_ids is None:
             query='MATCH (r:MemoryRecord {namespace:$ns}) '
         else:
-            query='UNWIND $uids AS uid MATCH (m:Memory {uid:uid})-[:HAS_REVISION]->(r:MemoryRecord) '
+            # Match state identity by its actual fields to include legacy rows
+            # without conflating colon-separated subject/key pairs.
+            query=('CALL { UNWIND $uids AS uid MATCH (m:Memory {uid:uid})-[:HAS_REVISION]->(r:MemoryRecord) RETURN r '
+                   'UNION UNWIND $identities AS pair MATCH (r:MemoryRecord {namespace:$ns,subject:pair.subject,key:pair.key}) '
+                   'WHERE r.record_kind="state" RETURN r } WITH DISTINCT r ')
         query+='WHERE r.namespace=$ns AND r.seq<=$revision AND r.recorded_at<=datetime($known)'
         if kind:
             query+=' AND r.record_kind=$kind'
@@ -392,13 +429,13 @@ class MemoryStore(StateProjection):
             query+=' AND r.subject=$subject'
         return [_native(x['r']) for x in self._run(query+' RETURN properties(r) AS r ORDER BY r.seq',
                 ns=self.namespace,known=stamp(known_at),kind=kind,revision=revision,subject=subject,
-                uids=[self._uid('memory:'+key) for key in dict.fromkeys(logical_ids or [])])]
+                uids=[self._uid('memory:'+key) for key in generic],identities=identities)]
 
     def _visible(self,known_at,subject=None,key=None,*,logical_ids=None,revision=None):
         if subject is not None and key is not None:
-            logical_ids=['state:'+subject+':'+key]
+            logical_ids=[state_key(subject,key)]
         rows=self._rows(known_at,'state',logical_ids,revision,subject)
-        roots={r['root_id']:r for r in rows}
+        roots={(r['subject'],r['key'],r['root_id']):r for r in rows}
         return rows,list(roots.values())
 
     @staticmethod
@@ -450,14 +487,15 @@ class MemoryStore(StateProjection):
 
     def record_keys(self, identifiers, view):
         rows=self._run('UNWIND $uids AS uid MATCH (r:MemoryRecord {uid:uid}) '
-            'WHERE r.seq<=$revision AND r.recorded_at<=datetime($known) RETURN DISTINCT r.logical_id AS key',
+            'WHERE r.seq<=$revision AND r.recorded_at<=datetime($known) '
+            'RETURN DISTINCT r.logical_id AS key,r.record_kind AS kind,r.subject AS subject,r.key AS state_key',
             uids=[self._uid(i) for i in identifiers],revision=view.revision,known=stamp(view.known_at))
-        return [r['key'] for r in rows]
+        return list(dict.fromkeys(state_key(r['subject'],r['state_key']) if r['kind']=='state' else r['key'] for r in rows))
 
-    def details(self,event_ids,known_at=None,*,view=None):
-        view=view or self.capture_view(known_at=known_at)
+    def details(self,event_ids,known_at=None,*,at=None,view=None):
+        view=view or self.capture_view(at=at,known_at=known_at)
         keys=self.record_keys(event_ids,view)
-        current={r['record_id'] for r in self.records(view=view,logical_ids=keys,include_inactive=True)}
+        current={r['record_id']:r for r in self.records(view=view,logical_ids=keys,include_inactive=True)}
         rows=self._run('UNWIND $uids AS uid MATCH (r:MemoryRecord {uid:uid}) '
                        'WHERE r.seq<=$revision AND r.recorded_at<=datetime($known) '
                        'OPTIONAL MATCH (r)-[:EVIDENCED_BY]->(s:EvidenceSource) '
@@ -477,6 +515,21 @@ class MemoryStore(StateProjection):
                                   'WHERE e.seq<=$revision AND e.recorded_at<=datetime($known) RETURN e.event_id AS id',
                                   uid=row['uid'],revision=view.revision,known=stamp(view.known_at))
                 record['support_record_ids']=[r['id'] for r in evidence]
+                projection=current.get(row['event_id'])
+                if projection:
+                    record.update({k:projection[k] for k in ('status','evidence_status')})
+                else:
+                    support_keys=self.record_keys(record['support_record_ids'],view)
+                    live={r['record_id'] for r in self.records(view=view,logical_ids=support_keys,include_inactive=True)}
+                    record['evidence_status']='current' if all(i in live for i in record['support_record_ids']) else 'changed'
+                    record['status']='superseded'
+                    if record.get('valid_from') and datetime.fromisoformat(record['valid_from'])>view.at:
+                        latest=self.latest_record_ids([record['id']],view)
+                        if latest and latest[0]['id']==record['record_id']:
+                            record['status']='scheduled'
+                            record['superseded']=False
+            record['at']=stamp(view.at)
+            record['known_at']=stamp(view.known_at)
             out.append(record)
         by_id={r['event_id']:r for r in out}
         return [by_id[i] for i in dict.fromkeys(event_ids) if i in by_id]
@@ -485,7 +538,6 @@ class MemoryStore(StateProjection):
         parts=tokens(query)
         if not parts or record_ids==[]:
             return []
-        expression=' OR '.join('"'+p+'"' for p in parts)
         cypher='CALL db.index.fulltext.queryNodes("chronicle_text",$query) YIELD node,score '
         cypher+='WHERE node.namespace=$ns AND node.seq<=$revision AND node.recorded_at<=datetime($known) '
         if record_ids is not None:
@@ -493,11 +545,35 @@ class MemoryStore(StateProjection):
         if subject is not None:
             cypher+='AND (node.subject=$subject OR node.logical_id=$subject OR node.title=$subject OR EXISTS { MATCH (node)-[:INVOLVES]->(e:Entity) WHERE e.id=$subject OR e.name=$subject OR $subject IN e.aliases }) '
         if logical_keys:
-            cypher+='WITH node.logical_id AS key,max(score) AS score RETURN key,score ORDER BY score DESC,key LIMIT $limit'
+            cypher+=('WITH node,score ORDER BY score DESC,node.seq DESC '
+                'WITH node.logical_id AS key,node.record_kind AS kind,node.subject AS subject,node.key AS state_key, '
+                'max(score) AS score,collect(node.event_id)[..8] AS matched_record_ids '
+                'RETURN key,kind,subject,state_key,score,head(matched_record_ids) AS id,matched_record_ids '
+                'ORDER BY score DESC,key LIMIT $limit')
         else:
-            cypher+='RETURN node.event_id AS id,node.logical_id AS key,score ORDER BY score DESC,id LIMIT $limit'
-        return self._run(cypher,query=expression,ns=self.namespace,revision=view.revision,known=stamp(view.known_at),
-                         ids=record_ids,subject=subject,limit=limit)
+            cypher+=('RETURN node.event_id AS id,node.logical_id AS key,node.record_kind AS kind, '
+                     'node.subject AS subject,node.key AS state_key,score ORDER BY score DESC,id LIMIT $limit')
+        found={}
+        # Lucene caps BooleanQuery clauses. Keep the entire source and query all
+        # chunks; LIMIT alone does not protect query parsing from long messages.
+        for offset in range(0,len(parts),256):
+            expression=' OR '.join('"'+part+'"' for part in parts[offset:offset+256])
+            rows=self._run(cypher,query=expression,ns=self.namespace,revision=view.revision,known=stamp(view.known_at),
+                           ids=record_ids,subject=subject,limit=limit)
+            for row in rows:
+                if row['kind']=='state':
+                    row['key']=state_key(row['subject'],row['state_key'])
+                key=row['key'] if logical_keys else row['id']
+                previous=found.get(key)
+                if previous and logical_keys:
+                    ids=list(dict.fromkeys(previous['matched_record_ids']+row['matched_record_ids']))[:8]
+                else:
+                    ids=row.get('matched_record_ids',[])
+                if previous is None or row['score']>previous['score']:
+                    found[key]=row
+                if logical_keys:
+                    found[key]['matched_record_ids']=ids
+        return sorted(found.values(),key=lambda r:(-r['score'],r['key'],r['id']))[:limit]
 
     def lexical(self,query,limit=100):
         return [r['id'] for r in self.keyword_matches(query,self.capture_view(),limit)]
@@ -559,12 +635,23 @@ class MemoryStore(StateProjection):
         links=self.association_views(view=view,memory_keys=[seed['id']])
         shared=self._entity_records('MATCH (a:MemoryRecord {uid:$uid})-[:INVOLVES]->(e:Entity)',
             view,limit+1,exclude=seed['record_id'],uid=self._uid(seed['record_id']))
-        evidence=self._run('MATCH (a:MemoryRecord {uid:$uid})-[:SUPPORTED_BY]-(previous:MemoryRecord)<-[:HAS_REVISION]-(m:Memory {namespace:$ns}) '
-            'WHERE previous.seq<=$revision AND previous.recorded_at<=datetime($known) '
-            'WITH DISTINCT a,m '+CURRENT_RECORD+
-            'WITH a,current WHERE EXISTS { MATCH (a)-[:SUPPORTED_BY]-(current) } '
-            'RETURN current.event_id AS id,current.logical_id AS key '
-            'ORDER BY current.recorded_at DESC,key LIMIT $limit',uid=self._uid(seed['record_id']),
+        if seed['record_kind']=='experience':
+            evidence_query=('MATCH (a:Memory {uid:$memory})-[:HAS_REVISION]->(:Experience)<-[:SUPPORTED_BY]-(previous:Understanding)'
+                '<-[:HAS_REVISION]-(m:Memory {namespace:$ns}) '
+                'WHERE previous.seq<=$revision AND previous.recorded_at<=datetime($known) '
+                'WITH DISTINCT a,m '+CURRENT_RECORD+
+                'MATCH (current)-[:SUPPORTED_BY]->(cited:Experience)<-[:HAS_REVISION]-(a) ')
+        else:
+            evidence_query=('MATCH (a:Understanding {uid:$uid})-[:SUPPORTED_BY]->(previous:Experience)'
+                '<-[:HAS_REVISION]-(m:Memory {namespace:$ns}) '
+                'WHERE previous.seq<=$revision AND previous.recorded_at<=datetime($known) '
+                'WITH DISTINCT a,m '+CURRENT_RECORD+
+                'MATCH (a)-[:SUPPORTED_BY]->(cited:Experience)<-[:HAS_REVISION]-(m) ')
+        evidence=self._run(evidence_query+
+            'WHERE cited.seq<=$revision AND cited.recorded_at<=datetime($known) '
+            'WITH current,collect(DISTINCT cited.event_id) AS cited_record_ids '
+            'RETURN current.event_id AS id,current.logical_id AS key,cited_record_ids '
+            'ORDER BY current.recorded_at DESC,key LIMIT $limit',uid=self._uid(seed['record_id']),memory=self._uid('memory:'+seed['id']),
             ns=self.namespace,revision=view.revision,known=stamp(view.known_at),at=stamp(view.at),limit=limit+1)
         traversal_truncated=len(shared)>limit or len(evidence)>limit
         shared=shared[:limit];evidence=evidence[:limit]
@@ -585,7 +672,9 @@ class MemoryStore(StateProjection):
             for entity in row['entities']:
                 add(by_id.get(row['id']),'shared_entity',entity)
         for row in evidence:
-            add(by_id.get(row['id']),'evidence',seed['record_id'])
+            current_id=seed['record_id'] if seed['record_kind']=='experience' else row['id']
+            add(by_id.get(row['id']),'evidence',{'cited_record_ids':row['cited_record_ids'],
+                'current_record_id':current_id,'evidence_status':'current' if row['cited_record_ids']==[current_id] else 'changed'})
         def rank(item):
             priority=min(2 if r['reason']=='shared_entity' else 1 if r['reason']=='evidence' else 0 for r in item['reasons'])
             return priority,-datetime.fromisoformat(item['record']['recorded_at']).timestamp(),item['record']['id']
@@ -600,12 +689,22 @@ class MemoryStore(StateProjection):
         if memory_id:
             base+='AND (r.logical_id=$id OR r.event_id=$id) '
         if entity_id:
-            base+='AND EXISTS { MATCH (r)-[:INVOLVES]->(e:Entity {uid:$entity}) } '
-        base+='WITH r,coalesce(r.occurred_start,r.valid_from) AS begin,coalesce(r.occurred_end,r.occurred_start,r.valid_from) AS finish '
+            base+=('AND (EXISTS { MATCH (r)-[:INVOLVES]->(e:Entity {uid:$entity}) } OR EXISTS { '
+                   'MATCH (r)-[:SUPPORTED_BY]->(e:Experience)-[:INVOLVES]->(:Entity {uid:$entity}) '
+                   'WHERE e.seq<=$revision AND e.recorded_at<=datetime($known) }) ')
+        base+=('WITH r,coalesce(r.occurred_start,r.valid_from) AS begin, '
+               'CASE WHEN r.record_kind="understanding" THEN r.valid_to '
+               'WHEN r.occurred_end IS NOT NULL THEN r.occurred_end '
+               'WHEN r.time_precision="day" THEN r.occurred_start+duration({days:1}) '
+               'ELSE r.occurred_start END AS finish, '
+               '(r.record_kind="understanding" OR r.occurred_end IS NOT NULL OR r.time_precision="day") AS interval '
+               'WITH r,interval,CASE WHEN begin IS NULL THEN null ELSE datetime({datetime:begin,timezone:"+00:00"}) END AS begin, '
+               'CASE WHEN finish IS NULL THEN null ELSE datetime({datetime:finish,timezone:"+00:00"}) END AS finish ')
         args=dict(ns=self.namespace,revision=view.revision,known=stamp(view.known_at),id=memory_id,
                   entity=self._uid('entity:'+entity_id) if entity_id else None,
                   start=stamp(start) if start else None,end=stamp(end) if end else None,limit=limit+1)
-        timed=self._run(base+'WHERE begin IS NOT NULL AND ($start IS NULL OR finish>=datetime($start)) '
+        timed=self._run(base+'WHERE begin IS NOT NULL AND ($start IS NULL OR finish IS NULL OR '
+            '(interval AND finish>datetime($start)) OR (NOT interval AND finish>=datetime($start))) '
             'AND ($end IS NULL OR begin<datetime($end)) RETURN r.event_id AS id,r.logical_id AS key ORDER BY begin,r.seq LIMIT $limit',**args)
         unknown=self._run(base+'WHERE begin IS NULL RETURN r.event_id AS id,r.logical_id AS key ORDER BY r.recorded_at,r.seq LIMIT $limit',**args)
         ids=[r['id'] for r in timed[:limit]];unknown_ids=[r['id'] for r in unknown[:limit]]
@@ -614,22 +713,54 @@ class MemoryStore(StateProjection):
             'WHERE r.category="association" AND r.namespace=$ns AND r.seq<=$revision AND r.recorded_at<=datetime($known) '
             'WITH DISTINCT r RETURN properties(r) AS r,startNode(r).id AS from_id,endNode(r).id AS to_id '
             'ORDER BY r.recorded_at,r.seq LIMIT $limit',uids=[self._uid('memory:'+key) for key in keys],
-            ns=self.namespace,revision=view.revision,known=stamp(view.known_at),limit=limit)
+            ns=self.namespace,revision=view.revision,known=stamp(view.known_at),limit=limit+1)
+        latest=self._association_heads([r['r']['logical_id'] for r in links[:limit]],view)
         return {'known_at':stamp(view.known_at),'revision':view.revision,
                 'records':self.details(ids,view=view),'undated':self.details(unknown_ids,view=view),
-                'associations':[{**_native(r['r']),'from_id':r['from_id'],'to_id':r['to_id']} for r in links],
-                'truncated':len(timed)>limit or len(unknown)>limit,
+                'associations':[{**_native(r['r']),'from_id':r['from_id'],'to_id':r['to_id'],
+                    'superseded':r['r']['id']!=latest[r['r']['logical_id']],
+                    'current_version_id':latest[r['r']['logical_id']]} for r in links[:limit]],
+                'truncated':len(timed)>limit or len(unknown)>limit or len(links)>limit,
                 'note':'undated 不参与精确日期范围断言；完整叙述保留时间的不确定性。'}
+
+    def _association_heads(self,identifiers,view):
+        if not identifiers:
+            return {}
+        query='CALL { '+' UNION ALL '.join(
+            f'UNWIND $ids AS id MATCH ()-[r:{kind}]->() WHERE r.namespace=$ns AND r.logical_id=id '
+            'AND r.category="association" AND r.seq<=$revision AND r.recorded_at<=datetime($known) RETURN r'
+            for kind in RELATIONS.values())+' } WITH r ORDER BY r.seq DESC '
+        rows=self._run(query+'RETURN r.logical_id AS key,head(collect(r.id)) AS id',
+                       ids=list(dict.fromkeys(identifiers)),ns=self.namespace,revision=view.revision,known=stamp(view.known_at))
+        return {r['key']:r['id'] for r in rows}
 
     def upcoming(self,subjects,at,known_at,limit=8,*,view=None):
         view=view or self.capture_view(at,known_at)
         candidates=self._run('MATCH (r:MemoryEvent {namespace:$ns}) WHERE r.subject IN $subjects '
-            'AND r.seq<=$revision AND r.recorded_at<=datetime($known) AND r.effective_at>datetime($at) '
-            'RETURN DISTINCT r.logical_id AS key LIMIT $limit',ns=self.namespace,subjects=list(subjects),
-            revision=view.revision,known=stamp(view.known_at),at=stamp(view.at),limit=max(limit*8,64))
-        _,rows=self._visible(view.known_at,logical_ids=[r['key'] for r in candidates],revision=view.revision)
-        future=sorted((r for r in rows if r['effective_at']>stamp(view.at)),key=lambda r:r['effective_at'])
-        return [self._event(r) for r in future[:limit]]
+            'AND r.seq<=$revision AND r.recorded_at<=datetime($known) '
+            'AND (r.effective_at>datetime($at) OR EXISTS { MATCH (c:DueCheck)-[:CHECKS]->(r) '
+            'WHERE c.trigger IN ["deadline","review"] AND c.due_at>datetime($at) }) '
+            'RETURN DISTINCT r.subject AS subject,r.key AS key',ns=self.namespace,subjects=list(subjects),
+            revision=view.revision,known=stamp(view.known_at),at=stamp(view.at))
+        keys=[state_key(r['subject'],r['key']) for r in candidates]
+        _,rows=self._visible(view.known_at,logical_ids=keys,revision=view.revision)
+        states={(r['subject'],r['key']):r for r in self.states(view=view,logical_ids=keys)}
+        due=[]
+        for row in rows:
+            event=self._event(row)
+            if event['kind']=='plan' and event['plan_status']!='open':
+                continue
+            if event['effective_at']>stamp(view.at):
+                due.append((event['effective_at'],event));continue
+            if event['kind']!='plan' or event['plan_status']!='open':
+                continue
+            point=event.get('due_at') or event.get('review_at')
+            if not point or datetime.fromisoformat(point)<=view.at:
+                continue
+            state=states.get((event['subject'],event['key']),{'candidates':[]})
+            if any(event['event_id']==c['memory']['event_id'] for c in state['candidates']):
+                due.append((stamp(datetime.fromisoformat(point)),{**event,'status':state['status']}))
+        return [event for _,event in sorted(due,key=lambda item:(item[0],item[1]['event_id']))[:limit]]
 
     def tick(self):
         def write(tx):
@@ -668,12 +799,41 @@ class MemoryStore(StateProjection):
             return results
         return self._write(write)
 
-    def checks(self):
-        return [_native(r['c']) for r in self._run('MATCH (c:DueCheck {namespace:$ns}) RETURN properties(c) AS c ORDER BY c.due_at',ns=self.namespace)]
+    def checks(self,limit=50,offset=0):
+        rows=self._run('MATCH (c:DueCheck {namespace:$ns}) RETURN properties(c) AS c '
+                       'ORDER BY c.due_at,c.uid SKIP $offset LIMIT $limit',ns=self.namespace,offset=offset,limit=limit+1)
+        return {'items':[_native(r['c']) for r in rows[:limit]],'truncated':len(rows)>limit,
+                'next_offset':offset+limit if len(rows)>limit else None}
 
-    def reviews(self):
-        rows=self._run('MATCH (r:Review {namespace:$ns}) WHERE r.resolved_at IS NULL RETURN properties(r) AS r ORDER BY r.created_at',ns=self.namespace)
-        return [{**_native(row['r']),'body':json.loads(row['r']['body'])} for row in rows]
+    def pending_understandings(self,view,limit=50,offset=0):
+        rows=self._run('MATCH (m:Memory {namespace:$ns,kind:"understanding"}) '+CURRENT_RECORD+
+            'WITH current WHERE (EXISTS { '
+            'MATCH (c:DueCheck)-[:CHECKS]->(current) WHERE c.trigger="review" AND c.due_at<=datetime($at) }) '
+            'OR EXISTS { MATCH (current)-[:SUPPORTED_BY]->(cited:Experience)<-[:HAS_REVISION]-(e:Memory) '
+            'WHERE cited.occurred_start>datetime($at) OR EXISTS { MATCH (e)-[:HAS_REVISION]->(newer:Experience) '
+            'WHERE newer.seq>cited.seq AND newer.seq<=$revision AND newer.recorded_at<=datetime($known) } } '
+            'RETURN current.logical_id AS key ORDER BY current.recorded_at,current.logical_id SKIP $offset LIMIT $limit',
+            ns=self.namespace,revision=view.revision,known=stamp(view.known_at),at=stamp(view.at),offset=offset,limit=limit)
+        records={r['id']:r for r in self.records(view=view,logical_ids=[r['key'] for r in rows])}
+        return [{**records[row['key']],'review_kind':'understanding','resolution':'memory_write'}
+                for row in rows if row['key'] in records and records[row['key']]['status']=='needs_review']
+
+    def reviews(self,kind='all',limit=50,offset=0,at=None,known_at=None):
+        view=self.capture_view(at,known_at)
+        candidates=[];understandings=[]
+        if kind in ('all','candidate'):
+            rows=self._run('MATCH (r:Review {namespace:$ns}) WHERE r.created_at<=datetime($known) '
+                'AND (r.resolved_at IS NULL OR r.resolved_at>datetime($known)) '
+                'RETURN properties(r) AS r ORDER BY r.created_at,r.id LIMIT $limit',
+                ns=self.namespace,known=stamp(view.known_at),limit=offset+limit+1)
+            candidates=[{**_native(row['r']),'body':json.loads(row['r']['body']),
+                         'review_kind':'candidate','resolution':'memory_resolve_review'} for row in rows]
+        if kind in ('all','understanding'):
+            understandings=self.pending_understandings(view,offset+limit+1)
+        items=sorted(candidates+understandings,key=lambda r:(r.get('created_at',r.get('recorded_at')),r['id']))
+        more=len(items)>offset+limit
+        return {'items':items[offset:offset+limit],'truncated':more,'next_offset':offset+limit if more else None,
+                'at':stamp(view.at),'known_at':stamp(view.known_at)}
 
     def recent_sources(self,conversation_id,before_source,limit=6,*,known_at=None):
         rows=self._run('MATCH (s:EvidenceSource {namespace:$ns,conversation_id:$conversation}) WHERE s.id<>$before '
@@ -683,19 +843,25 @@ class MemoryStore(StateProjection):
                        known=stamp(known_at or self.clock()))
         return list(reversed([json.loads(row['body']) for row in rows]))
 
+    def latest_record_ids(self,keys,view):
+        rows=self._rows(view.known_at,logical_ids=keys,revision=view.revision)
+        latest={}
+        for row in rows:
+            key=state_key(row['subject'],row['key']) if row['record_kind']=='state' else row['logical_id']
+            latest[key]=row['event_id']
+        return [{'id':latest[key],'key':key} for key in dict.fromkeys(keys) if key in latest]
+
     def recent_memory_ids(self,source_ids,view,limit=20):
         if not source_ids:
             return []
-        # Follow a bounded set of source IDs, not the namespace's entire history.
         rows=self._run('UNWIND $uids AS uid MATCH (s:EvidenceSource {uid:uid})<-[:EVIDENCED_BY]-(r:MemoryRecord) '
             'WHERE r.seq<=$revision AND r.recorded_at<=datetime($known) '
-            'WITH r.logical_id AS key,max(r.seq) AS latest '
-            'ORDER BY latest DESC,key LIMIT $limit '
-            'MATCH (m:Memory {uid:$prefix+key})-[:HAS_REVISION]->(r:MemoryRecord) WHERE r.seq=latest '
-            'RETURN r.event_id AS id ORDER BY latest DESC,key',
-            uids=[self._uid(i) for i in source_ids],prefix=self._uid('memory:'),revision=view.revision,
-            known=stamp(view.known_at),limit=limit)
-        return [r['id'] for r in rows]
+            'WITH r.logical_id AS key,r.record_kind AS kind,r.subject AS subject,r.key AS state_key,max(r.seq) AS latest '
+            'RETURN key,kind,subject,state_key ORDER BY latest DESC,key LIMIT $limit',
+            uids=[self._uid(i) for i in source_ids],revision=view.revision,known=stamp(view.known_at),limit=limit)
+        keys=[state_key(r['subject'],r['state_key']) if r['kind']=='state' else r['key'] for r in rows]
+        # The most recent write can come from a different conversation/source.
+        return [r['id'] for r in self.latest_record_ids(keys,view)]
 
     def _vector_name(self,model):
         digest=hashlib.sha256((self.namespace+'\0'+model).encode()).hexdigest()[:24]
@@ -731,20 +897,43 @@ class MemoryStore(StateProjection):
             return [],'向量索引尚未建立；可运行 chronicle reindex'
         if found[0]['dimensions']!=len(vector):
             raise ValueError('查询向量维度与索引不一致')
-        rows=self._run('CALL db.index.vector.queryNodes($index,$fetch,$vector) YIELD node,score '
-            'MATCH (node)<-[:HAS_EMBEDDING]-(r:MemoryRecord) '
-            'WHERE r.namespace=$ns AND r.seq<=$revision AND r.recorded_at<=datetime($known) AND score>0.5 '
-            'AND ($ids IS NULL OR r.event_id IN $ids) '
-            'AND ($subject IS NULL OR r.subject=$subject OR r.logical_id=$subject OR r.title=$subject OR EXISTS { MATCH (r)-[:INVOLVES]->(e:Entity) WHERE e.id=$subject OR e.name=$subject OR $subject IN e.aliases }) '
-            'RETURN r.event_id AS id,r.logical_id AS key,score ORDER BY score DESC,id LIMIT $limit',
-            index=name,fetch=max(128,limit*4),vector=vector,ns=self.namespace,revision=view.revision,
-            known=stamp(view.known_at),ids=record_ids,subject=subject,limit=limit)
-        return rows,None
+        fetch=max(128,limit*4);maximum=max(fetch,4096)
+        while True:
+            rows=self._run('CALL db.index.vector.queryNodes($index,$fetch,$vector) YIELD node,score '
+                'MATCH (node)<-[:HAS_EMBEDDING]-(r:MemoryRecord) WHERE r.namespace=$ns '
+                'RETURN r.event_id AS id,r.logical_id AS key,r.record_kind AS kind,r.subject AS subject,r.key AS state_key,score, '
+                '(r.seq<=$revision AND r.recorded_at<=datetime($known) AND score>0.5 '
+                'AND ($ids IS NULL OR r.event_id IN $ids) '
+                'AND ($subject IS NULL OR r.subject=$subject OR r.logical_id=$subject OR r.title=$subject OR EXISTS { MATCH (r)-[:INVOLVES]->(e:Entity) WHERE e.id=$subject OR e.name=$subject OR $subject IN e.aliases })) AS eligible '
+                'ORDER BY score DESC,id',index=name,fetch=fetch,vector=vector,ns=self.namespace,revision=view.revision,
+                known=stamp(view.known_at),ids=record_ids,subject=subject)
+            logical={}
+            for row in rows:
+                if not row.pop('eligible'):
+                    continue
+                if row['kind']=='state':
+                    row['key']=state_key(row['subject'],row['state_key'])
+                if row['key'] not in logical:
+                    logical[row['key']]={**row,'matched_record_ids':[]}
+                if len(logical[row['key']]['matched_record_ids'])<8:
+                    logical[row['key']]['matched_record_ids'].append(row['id'])
+            exhausted=len(rows)<fetch
+            if len(logical)>=limit or exhausted or fetch>=maximum:
+                warning=None if exhausted or len(logical)>=limit else '向量候选预算已用完，版本或时间过滤可能导致召回不完整；可使用 history 查询指定对象'
+                return list(logical.values())[:limit],warning
+            fetch=min(fetch*2,maximum)
 
     def unembedded(self,model,limit=32):
         rows=self._run('MATCH (r:MemoryRecord {namespace:$ns}) WHERE NOT EXISTS { MATCH (r)-[:HAS_EMBEDDING]->(e:Embedding {model:$model}) } '
                        'RETURN properties(r) AS r ORDER BY r.seq LIMIT $limit',ns=self.namespace,model=model,limit=limit)
         return [self._event(_native(r['r']))|{'record_kind':r['r']['record_kind']} for r in rows]
+
+    def vector_record_matches(self,vector,model,view,record_ids):
+        return self._run('UNWIND $uids AS uid MATCH (r:MemoryRecord {uid:uid})-[:HAS_EMBEDDING]->(e:Embedding {model:$model}) '
+            'WHERE r.seq<=$revision AND r.recorded_at<=datetime($known) '
+            'WITH r,vector.similarity.cosine(e.values,$vector) AS score WHERE score>0.5 '
+            'RETURN r.event_id AS id,score ORDER BY score DESC,id',uids=[self._uid(i) for i in record_ids],
+            model=model,vector=vector,revision=view.revision,known=stamp(view.known_at))
 
     def drop_vector_indexes(self):
         # Used by isolated test/demo namespace cleanup, never by normal reads.
