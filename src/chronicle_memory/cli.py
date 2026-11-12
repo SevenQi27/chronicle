@@ -80,6 +80,7 @@ def parser():
     show.add_argument('event_ids',nargs='+')
     show.add_argument('--at')
     show.add_argument('--known-at')
+    show.add_argument('--source-mode',choices=['full','summary'],default='full')
     history=sub.add_parser('history',help='按记忆或实体查询历史',parents=[shared])
     for option in ('memory-id','entity-id','start','end','known-at'):
         history.add_argument('--'+option)
@@ -101,7 +102,7 @@ COMMANDS={
     'remember':('memory_write',()),'ingest':('memory_ingest',()),'resolve':('memory_resolve_review',()),
     'recall':('memory_context',('query','subject','at','known_at','limit','include_inactive','interpret_time')),
     'search':('memory_search',('query','subject','at','known_at','limit','include_inactive','interpret_time')),
-    'show':('memory_details',('event_ids','at','known_at')),
+    'show':('memory_details',('event_ids','at','known_at','source_mode')),
     'history':('memory_history',('memory_id','entity_id','start','end','known_at','limit')),
     'neighbors':('memory_neighbors',('record_id','at','known_at','limit')),
     'state':('memory_state',('subject','key','at','known_at')),

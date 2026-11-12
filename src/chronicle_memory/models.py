@@ -239,6 +239,7 @@ class DetailQuery(Model):
     event_ids: list[Text] = Field(min_length=1, max_length=50)
     at: AwareDatetime | None = None
     known_at: AwareDatetime | None = None
+    source_mode: Literal['full','summary'] = Field(default='full',description='full 返回全部来源正文；summary 保留全部来源标识/角色/时间/长度，省略来源正文，记忆正文仍完整')
 
 
 class PageQuery(Model):

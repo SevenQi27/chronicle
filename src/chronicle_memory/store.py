@@ -51,7 +51,7 @@ ASSOCIATION_LOOKUP = 'CALL { '+ ' UNION ALL '.join(
 # Resolve one logical memory before limiting graph traversal results. For an
 # experience, its latest account may move outside the requested time. For an
 # understanding, corrections replace their root before applicability is tested.
-CURRENT_RECORD = '''
+_RECORD_SELECTION = '''
 CALL {
     WITH m
     MATCH (m)-[:HAS_REVISION]->(candidate:MemoryRecord)
@@ -68,6 +68,9 @@ CALL {
     WITH candidate ORDER BY candidate.seq DESC LIMIT 1
     WITH candidate
     WHERE (candidate.record_kind<>'experience' OR candidate.effective_at IS NULL OR candidate.effective_at <= datetime($at))
+'''
+RECORD_HEAD = _RECORD_SELECTION+'    RETURN candidate AS current\n}\n'
+CURRENT_RECORD = _RECORD_SELECTION+'''
       AND (candidate.record_kind<>'understanding' OR candidate.valid_to IS NULL OR datetime({datetime:candidate.valid_to,timezone:'+00:00'}) > datetime($at))
     RETURN candidate AS current
 }
@@ -360,21 +363,32 @@ class MemoryStore(StateProjection):
             association_ids.append(aid)
         return ids,association_ids
 
+    def _applied_result(self,receipt,source,fingerprint):
+        if receipt['body']!=_json(source.model_dump(mode='json')):
+            raise ConflictError('source_conflict','相同 source.id 的内容或时间不能改变；重试必须提交相同消息',source_id=source.id)
+        saved=json.loads(receipt['extraction'])
+        saved['extraction']=Extraction.model_validate(saved['extraction']).model_dump(mode='json')
+        if _json(saved)!=fingerprint:
+            raise ConflictError('source_conflict','该 source.id 已应用另一份提取结果；修改记忆请使用新的来源 ID',source_id=source.id)
+        return json.loads(receipt['result'])
+
     def apply(self,source:Source,extraction:Extraction,*,review_id=None):
-        self.receive(source)
+        receipt=self.source(source.id)
+        if receipt is None or receipt['status']!='applied':
+            self.receive(source)
         fingerprint=_json({'extraction':extraction.model_dump(mode='json'),'review_id':review_id})
         if source.role=='assistant' and (extraction.memories or extraction.experiences or
                                        any(u.basis=='explicit' for u in extraction.understandings) or
                                        any(a.basis=='explicit' for a in extraction.associations)):
             raise ValueError('助手复述不能成为新事实或经历；可以引用真实经历保存明确标注 inferred 的认识')
+        # An applied receipt is immutable. Validating it is a read, not another
+        # namespace write; the transaction below still arbitrates racing writers.
+        if receipt and receipt['status']=='applied':
+            return self._applied_result(receipt,source,fingerprint)
         def write(tx):
             receipt=tx.run('MATCH (s:EvidenceSource {uid:$uid}) RETURN properties(s) AS s',uid=self._uid(source.id)).single()['s']
             if receipt['status']=='applied':
-                saved=json.loads(receipt['extraction'])
-                saved['extraction']=Extraction.model_validate(saved['extraction']).model_dump(mode='json')
-                if _json(saved)!=fingerprint:
-                    raise ConflictError('source_conflict','该 source.id 已应用另一份提取结果；修改记忆请使用新的来源 ID',source_id=source.id)
-                return json.loads(receipt['result'])
+                return self._applied_result(receipt,source,fingerprint)
             now=stamp(self.clock())
             state_ids=self._write_states(tx,source,extraction.memories,now)
             records,associations=self._graph(tx,source,extraction,now)
@@ -460,9 +474,19 @@ class MemoryStore(StateProjection):
                 break
         return selected
 
+    def _head_rows(self,view,logical_ids=None):
+        if logical_ids==[]:
+            return []
+        match=('MATCH (m:Memory {namespace:$ns}) ' if logical_ids is None else
+               'UNWIND $uids AS uid MATCH (m:Memory {uid:uid,namespace:$ns}) ')
+        rows=self._run(match+RECORD_HEAD+'RETURN properties(current) AS r ORDER BY current.seq',
+            ns=self.namespace,uids=[self._uid('memory:'+key) for key in dict.fromkeys(logical_ids or [])],
+            at=stamp(view.at),known=stamp(view.known_at),revision=view.revision)
+        return [_native(row['r']) for row in rows]
+
     def records(self,at=None,known_at=None,include_inactive=False,*,view=None,logical_ids=None):
         view=view or self.capture_view(at,known_at)
-        selected=self._select_records(self._rows(view.known_at,logical_ids=logical_ids,revision=view.revision),view.at)
+        selected=self._select_records(self._head_rows(view,logical_ids),view.at)
         understanding_ids=[r['record_id'] for r in selected if r['record_kind']=='understanding']
         supports={}; support_keys=set()
         if understanding_ids:
@@ -473,7 +497,7 @@ class MemoryStore(StateProjection):
             supports={r['id']:r['ids'] for r in support_rows}
             for r in support_rows:
                 support_keys.update(r['keys'])
-        live_supports=self._select_records(self._rows(view.known_at,'experience',list(support_keys),view.revision),view.at) if support_keys else []
+        live_supports=self._select_records(self._head_rows(view,list(support_keys)),view.at) if support_keys else []
         live_experiences={r['record_id'] for r in live_supports}
         for record in selected:
             if record['record_kind']=='understanding':
@@ -492,21 +516,28 @@ class MemoryStore(StateProjection):
             uids=[self._uid(i) for i in identifiers],revision=view.revision,known=stamp(view.known_at))
         return list(dict.fromkeys(state_key(r['subject'],r['state_key']) if r['kind']=='state' else r['key'] for r in rows))
 
-    def details(self,event_ids,known_at=None,*,at=None,view=None):
+    def details(self,event_ids,known_at=None,*,at=None,view=None,source_mode='full'):
+        if source_mode not in ('full','summary'):
+            raise ValueError('source_mode 必须是 full 或 summary')
         view=view or self.capture_view(at=at,known_at=known_at)
         keys=self.record_keys(event_ids,view)
         current={r['record_id']:r for r in self.records(view=view,logical_ids=keys,include_inactive=True)}
+        projection=('s.body' if source_mode=='full' else
+            'CASE WHEN s IS NULL THEN null ELSE {id:s.id,role:s.role,occurred_at:toString(s.occurred_at),'
+            'conversation_id:s.conversation_id,content_chars:size(s.content),content_omitted:true} END')
         rows=self._run('UNWIND $uids AS uid MATCH (r:MemoryRecord {uid:uid}) '
                        'WHERE r.seq<=$revision AND r.recorded_at<=datetime($known) '
                        'OPTIONAL MATCH (r)-[:EVIDENCED_BY]->(s:EvidenceSource) '
-                       'RETURN properties(r) AS r,collect(s.body) AS sources',
+                       'RETURN properties(r) AS r,collect('+projection+') AS sources',
                        uids=[self._uid(i) for i in dict.fromkeys(event_ids)],revision=view.revision,known=stamp(view.known_at))
         out=[]
         for item in rows:
             row=_native(item['r'])
             record=self._event(row)
             record['record_id']=row['event_id'];record['record_kind']=row['record_kind']
-            record['sources']=[json.loads(s) for s in item['sources']]
+            record['sources']=[json.loads(s) for s in item['sources']] if source_mode=='full' else item['sources']
+            record['source_mode']=source_mode
+            record['source_count']=len(record['sources'])
             record['source']=next((s for s in record['sources'] if s['id']==row['source_id']),None)
             if row['record_kind']!='state':
                 record['superseded']=row['event_id'] not in current

@@ -14,7 +14,7 @@ TOOLS = {
     "memory_context": (Query, "回答前回忆相关经历与认识，附关联理由和时间视角；需要原文时调用 memory_details。"),
     "memory_state": (StateQuery, "精确查询某主体属性在指定时间的状态。conflict 和 unknown 不得当作确定事实。"),
     "memory_timeline": (TimelineQuery, "查看单值属性的变化与纠错过程；经历与认识的历史使用 memory_history。"),
-    "memory_details": (DetailQuery, "按搜索返回的 ID 批量读取完整记忆、证据及复核状态，历史查询必须沿用 at 和 known_at。"),
+    "memory_details": (DetailQuery, "按 ID 读取完整记忆及复核状态；source_mode=summary 先查看来源标识和长度，需要来源正文时用 full（默认）。历史查询沿用 at 和 known_at。"),
     "memory_tick": (Empty, "处理当前已到期的检查，不执行外部操作、不自动将计划标成完成。"),
     "memory_now": (Empty, "读取当前时间、时区与绑定的记忆分区，用于解释今天、明天和安排的日期。"),
     "memory_reviews": (ReviewsQuery, "分页列出待确认候选和待复核认识。candidate 用 memory_resolve_review 处理；understanding 用 memory_write 更新认识及支持证据，不使用候选 review_id。返回 items、truncated 和 next_offset。"),

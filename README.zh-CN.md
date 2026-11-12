@@ -74,6 +74,8 @@ uv run chronicle history --entity-id friend-lin --namespace tutorial
 
 同时写入多段经历及有据可查的认识，参见 [`examples/experience.json`](examples/experience.json)。
 
+来源较长时，可用 `chronicle show RECORD_ID --source-mode summary`：记忆正文仍完整，所有来源的 ID、角色、时间和字符数都保留，并以 `content_omitted=true` 明示省略来源正文。需要原文时使用 `--source-mode full`，默认仍是 full。摘要模式不等于整个响应有固定大小上限。
+
 ## 探索记忆图谱
 
 启动本地只读的 **Chronicle 记忆观测台**：
@@ -109,6 +111,8 @@ MCP 初始化信息也包含使用指引。模型主动存取依赖宿主选择�
 ## 自动采集对话
 
 采集核心不依赖任何宿主，接收统一的 `CaptureEvent` JSON：`origin`、`turn_id`、`source`（消息 ID、会话 ID、角色、正文、带时区时间），以及可选的 `workspace`、`private` 字段。本地 SQLite 队列先可靠接收，worker 再将每轮对话归档为带版本的经历，保留说话者和原始证据。它**不会把助手回答自动归纳成已核实事实或长期认识**，也不需要额外模型 API。
+
+新采集快照保存来源引用清单和内容哈希，不再嵌入另一份完整消息正文。原始消息仍以不可变来源保存，完整详情会返回它们；既有快照不重写，旧格式未完成快照仍可重试。
 
 ```sh
 # 任意应用均可提交相同的事件格式。
@@ -245,6 +249,8 @@ CLI 查询和 MCP 服务不会启动 worker。多个 worker 共用 namespace 时
 
 检索先融合全文候选、实体匹配和可选 Neo4j 向量检索，再读取候选的历史与证据。结果返回 `candidate_count` 和 `candidate_budget`。单段记忆的版本或证据较多时，仍可能增加读取成本。
 
+经历和认识的当前版本先在 Neo4j 中选定，再把正文返回 Python；历史接口仍保留全部版本。这减少的是传输的版本数据，不表示数据库内部工作量完全不随历史增长。对已经成功的来源重试，会只读校验原始来源和提取回执，不再进入写事务。
+
 - 人物和证据邻居先解析查询视角下的有效版本，再按逻辑记忆排序和限量。`neighbors.truncated` 和 `recall.related_truncated` 表示未完全展开。
 - 证据邻居会跨版本追溯同一逻辑经历，同时保留实际引用的版本 ID，不会将旧认识的证据边擅自移到新版。待复核认识出现在关联上下文、attention 和 `reviews --kind understanding` 中。
 - 向量索引按 namespace 和模型分别建立，保留历史版本；召回按逻辑记忆去重并在预算内扩大候选窗口，预算耗尽时返回说明。选定的当前版本单独评分，避免旧版本占据其评分名额；查询指定对象历史时使用 `history`。
@@ -298,6 +304,8 @@ uv run pytest -q
 ```
 
 测试需要可用且已初始化的 Neo4j，使用独立 namespace 并清理自身数据。GitHub Actions 初始化独立 Neo4j 服务、执行测试并构建包。覆盖范围和宿主 Agent 验收步骤见 [测试指南](docs/testing.md)；协议检查与模型对话质量分别验证。
+
+存取基线可用 `uv run python scripts/benchmark_memory.py --output data/benchmarks/current.json` 重跑，无需模型。它记录质量场景、读取数据量、重复写事务及本机暖缓存耗时。[优化前](docs/benchmarks/memory-before.json)与[优化后](docs/benchmarks/memory-after.json)使用相同数据集，保留同样的质量结果。这是小规模合成本机测量，不是生产规模性能结论；无词面重叠的同义改写仍缺少语义召回信号。
 
 ## 许可证
 

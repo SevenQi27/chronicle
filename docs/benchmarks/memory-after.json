@@ -1,0 +1,212 @@
+{
+  "schema": 1,
+  "measured_at": "2026-11-12T06:38:10.052029+00:00",
+  "commit": "dce7ebf5a061d11bd8105eb0462537b0ed708c3f",
+  "code_sha256": "9badf9a40f69bac4ca03207e71a915bb48b8df046254c804f2ed13e633ac3f17",
+  "model_calls": 0,
+  "dataset": {
+    "noise_memories": 160,
+    "historical_revisions": 128,
+    "capture_messages": 16,
+    "comparison_capture_messages": 2
+  },
+  "notes": "Local warm samples, two warmups. JSON sizes are decoded payload estimates, not Bolt wire bytes. No external models. Not a production load test.",
+  "quality": [
+    {
+      "case": "exact",
+      "expected": [
+        "alpha-migration"
+      ],
+      "returned": [
+        "alpha-migration",
+        "capture-turn:comparison",
+        "beta-migration"
+      ],
+      "hit_at_3": true
+    },
+    {
+      "case": "entity_alias",
+      "expected": [
+        "alpha-migration",
+        "deployment"
+      ],
+      "returned": [
+        "deployment",
+        "alpha-migration"
+      ],
+      "hit_at_3": true
+    },
+    {
+      "case": "lexical_rephrase",
+      "expected": [
+        "alpha-migration"
+      ],
+      "returned": [
+        "alpha-migration",
+        "deployment",
+        "capture-turn:comparison"
+      ],
+      "hit_at_3": true
+    },
+    {
+      "case": "explicit_entity_scope",
+      "expected": [
+        "alpha-migration"
+      ],
+      "returned": [
+        "alpha-migration",
+        "deployment"
+      ],
+      "hit_at_3": true,
+      "cross_project_results": 0
+    },
+    {
+      "case": "corrected_current",
+      "expected": [
+        "deployment"
+      ],
+      "returned": [
+        "deployment"
+      ],
+      "hit_at_3": true,
+      "correct_version": true
+    },
+    {
+      "case": "historical_clue",
+      "expected": [
+        "deployment"
+      ],
+      "returned": [
+        "deployment"
+      ],
+      "hit_at_3": true,
+      "historical_marked": true
+    },
+    {
+      "case": "known_then",
+      "expected": [
+        "deployment"
+      ],
+      "returned": [
+        "deployment"
+      ],
+      "hit_at_3": true,
+      "correct_version": true
+    },
+    {
+      "case": "unrelated",
+      "expected": [],
+      "returned": [],
+      "hit_at_3": true
+    },
+    {
+      "case": "semantic_only",
+      "expected": [
+        "response-style"
+      ],
+      "returned": [],
+      "hit_at_3": false
+    },
+    {
+      "case": "mixed_archive_and_structured",
+      "expected": [
+        "alpha-migration"
+      ],
+      "returned": [
+        "alpha-migration",
+        "capture-turn:comparison",
+        "beta-migration"
+      ],
+      "hit_at_3": true,
+      "structured_first": true
+    }
+  ],
+  "search": {
+    "median_ms": 7.119,
+    "p95_ms": 8.563,
+    "samples": 20,
+    "response_json_bytes": 2224,
+    "statements": 7,
+    "returned_rows": 13,
+    "decoded_row_json_bytes": 8167,
+    "write_transactions": 0
+  },
+  "head_read_one_version": {
+    "median_ms": 1.015,
+    "p95_ms": 1.187,
+    "samples": 20,
+    "response_json_bytes": 15531,
+    "statements": 2,
+    "returned_rows": 2,
+    "decoded_row_json_bytes": 16072,
+    "write_transactions": 0
+  },
+  "head_read_many_versions": {
+    "median_ms": 1.2,
+    "p95_ms": 1.789,
+    "samples": 20,
+    "response_json_bytes": 15583,
+    "statements": 2,
+    "returned_rows": 2,
+    "decoded_row_json_bytes": 16137,
+    "write_transactions": 0
+  },
+  "search_many_versions": {
+    "median_ms": 7.085,
+    "p95_ms": 7.791,
+    "samples": 20,
+    "response_json_bytes": 1647,
+    "statements": 7,
+    "returned_rows": 4,
+    "decoded_row_json_bytes": 16797,
+    "write_transactions": 0
+  },
+  "idempotent_replay": {
+    "median_ms": 0.525,
+    "p95_ms": 0.662,
+    "samples": 20,
+    "response_json_bytes": 252,
+    "statements": 1,
+    "returned_rows": 1,
+    "decoded_row_json_bytes": 8789,
+    "write_transactions": 0
+  },
+  "replay_added_versions": 0,
+  "capture_replay": {
+    "median_ms": 0.801,
+    "p95_ms": 1.062,
+    "samples": 20,
+    "response_json_bytes": 38,
+    "statements": 1,
+    "returned_rows": 1,
+    "decoded_row_json_bytes": 45939,
+    "write_transactions": 0
+  },
+  "capture_full_details": {
+    "median_ms": 7.13,
+    "p95_ms": 13.4,
+    "samples": 20,
+    "response_json_bytes": 119545,
+    "statements": 4,
+    "returned_rows": 4,
+    "decoded_row_json_bytes": 223157,
+    "write_transactions": 0
+  },
+  "capture_source_count": 32,
+  "capture_source_bytes": 70382,
+  "capture_summary_details": {
+    "median_ms": 9.854,
+    "p95_ms": 11.865,
+    "samples": 20,
+    "response_json_bytes": 43059,
+    "statements": 4,
+    "returned_rows": 4,
+    "decoded_row_json_bytes": 145333,
+    "write_transactions": 0
+  },
+  "counts": {
+    "experience": 310,
+    "understanding": 1
+  },
+  "cleaned": true
+}

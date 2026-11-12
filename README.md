@@ -74,6 +74,8 @@ This example writes persistent data in `tutorial`. Replaying the same source and
 
 For multiple experiences and a supported understanding in one write, see [`examples/experience.json`](examples/experience.json) (Chinese sample content).
 
+For long evidence bundles, `chronicle show RECORD_ID --source-mode summary` returns the complete memory narrative plus every source's ID, role, timestamp, and character count, with `content_omitted=true`. Use `--source-mode full` to retrieve source text. The default remains `full`; summary mode does not impose a total response-size cap.
+
 ## Explore your memory graph
 
 Start the local, read-only **Chronicle Observatory**:
@@ -109,6 +111,8 @@ MCP initialization also supplies usage guidance. Model-initiated storage and rec
 ## Automatic conversation capture
 
 The capture core is host-neutral. It accepts `CaptureEvent` JSON containing `origin`, `turn_id`, a `source` (ID, conversation ID, role, content, timezone-aware timestamp), and optional `workspace`/`private` fields. A local SQLite outbox acknowledges receipt before Neo4j processing. A worker archives each turn as a versioned conversation experience, with original speakers and evidence retained. It does **not** automatically turn assistant answers into verified facts or inferred understandings, and needs no additional model API.
+
+New capture snapshots store a source-reference manifest and content hashes rather than another embedded copy of every message. Original messages remain immutable evidence sources and are included in full detail reads. Existing snapshots are not rewritten, and pending legacy snapshots can still be retried.
 
 ```sh
 # Any application can submit the same event format.
@@ -245,6 +249,8 @@ A processed check with outcome `conflict` means the check ran, not that the conf
 
 Retrieval combines full-text candidates, entity matches, and optional Neo4j vector search before loading candidate histories and evidence. Results expose `candidate_count` and `candidate_budget`. Large revision or evidence histories can still increase read cost.
 
+Current experience/understanding versions are selected in Neo4j before their bodies are returned to Python. Historical records remain available through `history`; this reduces transferred revision payloads, not all database work as history grows. Already-applied source retries validate the immutable source and extraction receipt without entering another write transaction.
+
 - Entity/evidence neighbors resolve the visible revision before sorting and limiting logical memories. `neighbors.truncated` and `recall.related_truncated` signal incomplete expansion.
 - Evidence neighbors follow the logical experience across revisions while retaining the exact cited version IDs. Replacing an experience does not silently reattach an understanding to new evidence. Pending understandings appear in related context/attention and in `reviews --kind understanding`.
 - Vector indexes are separated by namespace and model and retain historical versions. Retrieval deduplicates logical memories and expands the candidate window within a bounded budget; an exhausted window produces a warning. Current candidate versions are scored separately so old versions do not consume their scoring slots. Use `history` for a specific object's history.
@@ -298,6 +304,8 @@ uv run pytest -q
 ```
 
 Tests require a running, initialized Neo4j instance and use isolated namespaces with cleanup. GitHub Actions initializes a dedicated Neo4j service, runs the tests, and builds the package. See the [testing guide](docs/testing.md) (Chinese) for coverage and host-agent acceptance steps; protocol checks and model conversation quality are evaluated separately.
+
+A reproducible, model-free storage/retrieval baseline is available with `uv run python scripts/benchmark_memory.py --output data/benchmarks/current.json`. It records quality cases, returned payloads, idempotent-write transactions, and local warm timings. The [before](docs/benchmarks/memory-before.json) and [after](docs/benchmarks/memory-after.json) snapshots retain the same dataset and quality results. These are small synthetic local measurements, not production-scale performance claims; the zero-overlap paraphrase case remains unsupported without a semantic retrieval signal.
 
 ## License
 

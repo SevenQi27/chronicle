@@ -142,7 +142,7 @@ def archive_turn(store,turn_key,events):
     envelope={'capture_kind':'conversation_record','origin':events[0].origin,
               'conversation_id':events[0].source.conversation_id,'turn_id':events[0].turn_id,
               'messages':[e.model_dump(mode='json') for e in events]}
-    content=json.dumps(envelope,ensure_ascii=False,sort_keys=True)
+    legacy_content=json.dumps(envelope,ensure_ascii=False,sort_keys=True)
     source_id='capture-snapshot:'+digest(envelope)
     receipt=store.source(source_id)
     if receipt and receipt['status']=='applied':
@@ -172,6 +172,18 @@ def archive_turn(store,turn_key,events):
     episode=Experience(id=turn_key,title=title,narrative=narrative,entities=entities,source_ids=evidence,
         replaces=latest[0]['id'] if latest else None,
         when=ExperienceTime(start=start,end=end,precision='range' if start!=end else 'exact'))
+    # Each original message already has an immutable source. Snapshot sources
+    # reference those messages rather than copying the growing transcript again.
+    manifest={**envelope,'format':'source-references-v1','content_hash':digest(envelope),
+        'messages':[{'source_id':identifier,'role':event.source.role,
+                     'occurred_at':stamp(event.source.occurred_at),
+                     'content_sha256':hashlib.sha256(event.source.content.encode()).hexdigest()}
+                    for event,identifier in zip(events,evidence)]}
+    content=json.dumps(manifest,ensure_ascii=False,sort_keys=True)
+    # A previous version may have received the old snapshot before failing to
+    # commit it. Retry that receipt unchanged; never rewrite existing evidence.
+    if receipt and receipt['content']==legacy_content:
+        content=legacy_content
     source=Source(id=source_id,content=content,role='tool',occurred_at=end,
                   conversation_id=events[0].origin+':'+conversation)
     return store.apply(source,Extraction(experiences=[episode]))['record_ids'][0]
