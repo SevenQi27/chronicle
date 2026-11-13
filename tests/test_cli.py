@@ -94,3 +94,26 @@ def test_worker_is_a_separate_process_and_stops_cleanly(scenario):
     finally:
         if process.poll() is None:
             process.kill();process.communicate(timeout=5)
+
+
+def test_cli_multiquery_scope_visibility_forget_and_backup(scenario,tmp_path):
+    body=payload();body['context']={'origin':'cli','workspace':'/cli-test'}
+    body['source']['conversation_id']='cli-conversation'
+    assert call(scenario,'remember',body=body)[0].returncode==0
+    found=call(scenario,'search','unmatched','--alternative','散步','--workspace','/cli-test')[1]['result']
+    assert found['results'][0]['id']=='walk'
+    assert call(scenario,'search','散步','--conversation-id','wrong')[1]['result']['results']==[]
+    assert call(scenario,'visibility','withdraw','walk')[0].returncode==0
+    assert call(scenario,'search','散步')[1]['result']['results']==[]
+    assert call(scenario,'history','--memory-id','walk','--include-withdrawn')[1]['result']['records']
+    assert call(scenario,'visibility','restore','walk')[0].returncode==0
+    path=str(tmp_path/'backup.json')
+    assert call(scenario,'backup','export',path)[0].returncode==0
+    checked=call(scenario,'backup','validate',path)[1]['result']
+    assert checked['action']=='validated' and not checked['target_empty']
+    process,result=call(scenario,'backup','restore',path,'--confirmation',checked['confirmation'])
+    assert process.returncode==3 and result['error']['code']=='version_conflict'
+    preview=call(scenario,'forget','walk')[1]['result']
+    assert preview['action']=='preview'
+    assert call(scenario,'forget','walk','--confirmation',preview['confirmation'])[0].returncode==0
+    assert call(scenario,'remember',body=body)[1]['error']['code']=='memory_forgotten'

@@ -76,19 +76,38 @@ def parser():
         command.add_argument('--limit',type=int,default=8)
         command.add_argument('--include-inactive',action='store_true')
         command.add_argument('--interpret-time',action='store_true')
+        command.add_argument('--alternative',dest='alternatives',action='append',default=[])
+        for field in ('origin','workspace','conversation-id','source-id'):
+            command.add_argument('--'+field)
     show=sub.add_parser('show',help='批量读取记忆与证据',parents=[shared])
     show.add_argument('event_ids',nargs='+')
     show.add_argument('--at')
     show.add_argument('--known-at')
     show.add_argument('--source-mode',choices=['full','summary'],default='full')
+    show.add_argument('--include-withdrawn',action='store_true')
     history=sub.add_parser('history',help='按记忆或实体查询历史',parents=[shared])
     for option in ('memory-id','entity-id','start','end','known-at'):
         history.add_argument('--'+option)
     history.add_argument('--limit',type=int,default=30)
+    history.add_argument('--include-withdrawn',action='store_true')
     neighbors=sub.add_parser('neighbors',help='查看相关经历和认识',parents=[shared])
     neighbors.add_argument('record_id')
     neighbors.add_argument('--at');neighbors.add_argument('--known-at')
     neighbors.add_argument('--limit',type=int,default=12)
+    for command in (history,neighbors):
+        for field in ('origin','workspace','conversation-id','source-id'):
+            command.add_argument('--'+field)
+    visibility=sub.add_parser('visibility',help='撤回或恢复记忆的全部版本',parents=[shared])
+    visibility.add_argument('action',choices=['withdraw','restore'])
+    visibility.add_argument('memory_ids',nargs='+')
+    visibility.add_argument('--reason',default='')
+    forget=sub.add_parser('forget',help='预览永久遗忘范围，再用 token 确认',parents=[shared])
+    forget.add_argument('memory_ids',nargs='+')
+    forget.add_argument('--confirmation')
+    backup=sub.add_parser('backup',help='导出、校验及恢复分区备份',parents=[shared])
+    backup.add_argument('action',choices=['export','validate','restore'])
+    backup.add_argument('path')
+    backup.add_argument('--confirmation')
     for name in ('state','timeline'):
         command=sub.add_parser(name,help='查询精确属性的状态或变化',parents=[shared])
         command.add_argument('subject');command.add_argument('key')
@@ -100,14 +119,17 @@ def parser():
 
 COMMANDS={
     'remember':('memory_write',()),'ingest':('memory_ingest',()),'resolve':('memory_resolve_review',()),
-    'recall':('memory_context',('query','subject','at','known_at','limit','include_inactive','interpret_time')),
-    'search':('memory_search',('query','subject','at','known_at','limit','include_inactive','interpret_time')),
-    'show':('memory_details',('event_ids','at','known_at','source_mode')),
-    'history':('memory_history',('memory_id','entity_id','start','end','known_at','limit')),
+    'recall':('memory_context',('query','alternatives','subject','at','known_at','limit','include_inactive','interpret_time')),
+    'search':('memory_search',('query','alternatives','subject','at','known_at','limit','include_inactive','interpret_time')),
+    'show':('memory_details',('event_ids','at','known_at','source_mode','include_withdrawn')),
+    'history':('memory_history',('memory_id','entity_id','start','end','known_at','limit','include_withdrawn')),
     'neighbors':('memory_neighbors',('record_id','at','known_at','limit')),
     'state':('memory_state',('subject','key','at','known_at')),
     'timeline':('memory_timeline',('subject','key','known_at')),
     'now':('memory_now',()),'reviews':('memory_reviews',('kind','limit','offset','at','known_at')),'tick':('memory_tick',()),
+    'visibility':('memory_visibility',('memory_ids','action','reason')),
+    'forget':('memory_forget',('memory_ids','confirmation')),
+    'backup':('memory_backup',('action','path','confirmation')),
 }
 
 
@@ -125,7 +147,11 @@ def arguments(args):
         if args.command=='resolve':
             body['review_id']=args.review_id
         return body
-    return {field:getattr(args,field) for field in COMMANDS[args.command][1] if getattr(args,field) is not None}
+    body={field:getattr(args,field) for field in COMMANDS[args.command][1] if getattr(args,field) is not None}
+    if args.command in ('recall','search','history','neighbors'):
+        filters={field:getattr(args,field) for field in ('origin','workspace','conversation_id','source_id') if getattr(args,field) is not None}
+        if filters:body['filters']=filters
+    return body
 
 
 async def run(args,settings):

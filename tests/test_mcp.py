@@ -95,3 +95,26 @@ def test_generated_host_configuration_is_valid_and_uses_absolute_paths(tmp_path,
     assert Path(entry["command"]).is_absolute()
     assert entry["args"][0]=="mcp"
     assert Path(entry["args"][2]).is_absolute()
+
+
+async def test_native_mcp_lifecycle_catalog_and_operations(mcp_namespace,tmp_path):
+    params=StdioServerParameters(command=str(Path(sys.executable).with_name('chronicle')),
+        args=['mcp','--env-file',str(Path(__file__).resolve().parents[1]/'.env'),'--namespace',mcp_namespace],env=connection_env())
+    async with stdio_client(params) as (read,write):
+        async with ClientSession(read,write,read_timeout_seconds=15) as client:
+            await client.initialize()
+            definitions={t.name:t for t in (await client.list_tools()).tools}
+            assert definitions['memory_forget'].annotations.destructive_hint
+            now=(await client.call_tool('memory_now',{})).structured_content['result']['now']
+            assert not (await client.call_tool('memory_write',{'source':{'id':'life','content':'aurora','occurred_at':now},
+                'context':{'workspace':'/mcp'},'experiences':[{'id':'life','title':'aurora','narrative':'aurora'}]})).is_error
+            found=await client.call_tool('memory_context',{'query':'unmatched','alternatives':['aurora'],'filters':{'workspace':'/mcp'}})
+            assert found.structured_content['result']['results'][0]['id']=='life'
+            assert not (await client.call_tool('memory_visibility',{'memory_ids':['life'],'action':'withdraw'})).is_error
+            assert (await client.call_tool('memory_context',{'query':'aurora'})).structured_content['result']['results']==[]
+            assert not (await client.call_tool('memory_visibility',{'memory_ids':['life'],'action':'restore'})).is_error
+            exported=await client.call_tool('memory_backup',{'action':'export','path':str(tmp_path/'mcp.json')})
+            assert exported.structured_content['result']['action']=='exported'
+            preview=(await client.call_tool('memory_forget',{'memory_ids':['life']})).structured_content['result']
+            deleted=await client.call_tool('memory_forget',{'memory_ids':['life'],'confirmation':preview['confirmation']})
+            assert not deleted.is_error and deleted.structured_content['result']['action']=='forgotten'

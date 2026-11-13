@@ -118,16 +118,16 @@ class MemoryService:
             inactive=inactive or parsed.include_inactive
         return await self.database(self.store.capture_view,at,known_at),inactive,None
 
-    async def _search(self,request,view,include_inactive):
+    async def _search_single(self,request,view,include_inactive):
         budget=max(64,request.limit*8)
-        keywords=await self.database(self.store.keyword_matches,request.query,view,budget,logical_keys=True,subject=request.subject)
-        entities=await self.database(self.store.entity_candidates,request.query,view,budget,subject=request.subject)
+        keywords=await self.database(self.store.keyword_matches,request.query,view,budget,logical_keys=True,subject=request.subject,filters=request.filters)
+        entities=await self.database(self.store.entity_candidates,request.query,view,budget,subject=request.subject,filters=request.filters)
         vectors=[];warnings=[];embedding=None
         if self.settings.embedding_model:
             try:
                 embedding=(await self.provider.embed([request.query]))[0]
                 vectors,warning=await self.database(self.store.vector_matches,embedding,self.settings.embedding_model,
-                    view,budget,subject=request.subject)
+                    view,budget,subject=request.subject,filters=request.filters)
                 if warning:
                     warnings.append(warning)
             except (ProviderError,ValueError,Neo4jError,DriverError) as error:
@@ -140,9 +140,10 @@ class MemoryService:
                     seen.add(row['key']);key_scores[row['key']]+=1/(60+len(seen))
         keys=sorted(key_scores,key=lambda key:(-key_scores[key],key))[:budget]
         states=await self.database(self.store.states,view=view,logical_ids=keys,subject=request.subject)
+        states=await self.database(self.store.scoped_states,states,request.filters,view)
         if not include_inactive:
             states=[s for s in states if s['status'] not in ('expired','cancelled','completed')]
-        generic=await self.database(self.store.records,view=view,logical_ids=keys,include_inactive=include_inactive)
+        generic=await self.database(self.store.records,view=view,logical_ids=keys,include_inactive=include_inactive,filters=request.filters)
         state_count=len(states)
         for record in generic:
             states.append({'generic':record,'status':record['status'],
@@ -153,8 +154,8 @@ class MemoryService:
                 for evidence in candidate['evidence']:
                     evidence_to_state[evidence['event_id']]=index
         ids=list(evidence_to_state)
-        matches=await self.database(self.store.keyword_matches,request.query,view,max(1,len(ids)),record_ids=ids,subject=request.subject)
-        entity_matches=await self.database(self.store.entity_candidates,request.query,view,max(1,len(ids)),record_ids=ids,subject=request.subject)
+        matches=await self.database(self.store.keyword_matches,request.query,view,max(1,len(ids)),record_ids=ids,subject=request.subject,filters=request.filters)
+        entity_matches=await self.database(self.store.entity_candidates,request.query,view,max(1,len(ids)),record_ids=ids,subject=request.subject,filters=request.filters)
         current_vectors=[]
         if embedding is not None:
             try:
@@ -199,6 +200,38 @@ class MemoryService:
         return {'status':'ok','at':stamp(view.at),'known_at':stamp(view.known_at),'revision':view.revision,
                 'results':results,'warnings':warnings,'candidate_count':len(keys),'candidate_budget':budget}
 
+    async def _search(self,request,view,include_inactive):
+        queries=list(dict.fromkeys([request.query,*request.alternatives]))
+        if len(queries)==1:
+            result=await self._search_single(request,view,include_inactive)
+            for row in result['results']:
+                row['matched_queries']=[request.query]
+            return result
+        merged={};traces=[];warnings=[];candidate_count=candidate_budget=0
+        for query in queries:
+            result=await self._search_single(request.model_copy(update={'query':query,'alternatives':[],
+                'limit':min(50,request.limit*2)}),view,include_inactive)
+            traces.append({'query':query,'results':len(result['results']),'candidate_count':result['candidate_count']})
+            candidate_count+=result['candidate_count'];candidate_budget+=result['candidate_budget']
+            warnings.extend(result['warnings'])
+            for rank,row in enumerate(result['results'],1):
+                key=row.get('record_id') or state_key(row['subject'],row['key'])
+                if key not in merged:merged[key]={**row,'score':0.,'matched_queries':[],'matches':[]}
+                item=merged[key]
+                item['score']+=1/(60+rank)
+                item['matched_queries'].append(query)
+                item['matches'].append({'query':query,'rank':rank,'match_scope':row.get('match_scope','current'),
+                                        'matched_record_ids':row.get('matched_record_ids',[])})
+                if row.get('match_scope')=='current':item['match_scope']='current'
+                if row.get('matched_record_ids'):
+                    item['matched_record_ids']=list(dict.fromkeys(item.get('matched_record_ids',[])+row['matched_record_ids']))
+        ordered=sorted(merged.items(),key=lambda pair:(-pair[1]['score'],pair[0]))
+        results=[dict(row,score=round(row['score'],6)) for _,row in ordered[:request.limit]]
+        return {'status':'ok','at':stamp(view.at),'known_at':stamp(view.known_at),'revision':view.revision,
+            'results':results,'warnings':list(dict.fromkeys(warnings)),'queries':traces,'score_method':'query_rrf',
+            'candidate_count':candidate_count,'candidate_budget':candidate_budget,
+            'candidate_count_includes_query_duplicates':True,'unique_ranked_candidates':len(merged)}
+
     async def search(self,request:Query):
         view,inactive,clarification=await self._view(request)
         if clarification:
@@ -215,12 +248,13 @@ class MemoryService:
             related.add(request.subject)
         state_keys=[state_key(r['subject'],r['key']) for r in result['results'] if 'subject' in r]
         states=await self.database(self.store.states,view=view,logical_ids=state_keys)
+        states=await self.database(self.store.scoped_states,states,request.filters,view)
         attention=[s for s in states if s['status'] in ('needs_review','awaiting_outcome','conflict')]
         seeds=[r['record_id'] for r in result['results'] if r.get('record_kind')]
         connected={}
         related_truncated=len(seeds)>5
         for identifier in seeds[:5]:
-            neighborhood=await self.database(self.store.neighbors,identifier,view=view,limit=8)
+            neighborhood=await self.database(self.store.neighbors,identifier,view=view,limit=8,filters=request.filters)
             related_truncated=related_truncated or neighborhood['truncated']
             for neighbor in neighborhood['neighbors']:
                 record=neighbor['record']
@@ -232,7 +266,7 @@ class MemoryService:
             'title':r['title'],'status':r['status'],'resolution':'memory_write'}
             for r in result['results']+list(connected.values())
             if r.get('record_kind')=='understanding' and r['status']=='needs_review'}
-        upcoming=await self.database(self.store.upcoming,related,view.at,view.known_at,view=view)
+        upcoming=await self.database(self.store.upcoming,related,view.at,view.known_at,view=view,filters=request.filters)
         return {**result,'related_memories':list(connected.values())[:12],
             'related_truncated':related_truncated or len(connected)>12,'upcoming':upcoming,
             'attention':[{'subject':s['subject'],'key':s['key'],'status':s['status'],

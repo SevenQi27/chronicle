@@ -17,10 +17,10 @@ def graph_snapshot(store, limit=200):
     view=store.capture_view()
     params={'ns':store.namespace,'revision':view.revision,'known':stamp(view.known_at)}
     total=store._run('MATCH (r:MemoryRecord {namespace:$ns}) '
-        'WHERE r.seq<=$revision AND r.recorded_at<=datetime($known) '
+        'WHERE r.seq<=$revision AND r.recorded_at<=datetime($known) AND NOT coalesce(r.withdrawn,false) '
         'RETURN count(r) AS total',**params)[0]['total']
     rows=store._run('MATCH (r:MemoryRecord {namespace:$ns}) '
-        'WHERE r.seq<=$revision AND r.recorded_at<=datetime($known) '
+        'WHERE r.seq<=$revision AND r.recorded_at<=datetime($known) AND NOT coalesce(r.withdrawn,false) '
         'RETURN properties(r) AS r ORDER BY r.seq DESC LIMIT $limit',limit=limit,**params)
     nodes={}; latest={}; uids=[]
     for item in rows:

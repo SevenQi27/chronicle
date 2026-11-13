@@ -10,7 +10,7 @@ import signal
 import sqlite3
 import time
 
-from .models import Entity, Experience, ExperienceTime, Extraction, Model, Source, Text, stamp, utcnow
+from .models import Entity, Experience, ExperienceTime, Extraction, Model, Source, Text, WriteContext, stamp, utcnow
 
 
 class CaptureEvent(Model):
@@ -56,6 +56,11 @@ class CaptureQueue:
                 );
                 CREATE INDEX IF NOT EXISTS capture_ready ON events(status,retry_at,sequence);
                 CREATE INDEX IF NOT EXISTS capture_turn ON events(turn_key,sequence);
+                CREATE TABLE IF NOT EXISTS forget_cleanup (
+                    identity TEXT PRIMARY KEY,
+                    marker_signature TEXT NOT NULL,
+                    sequence INTEGER NOT NULL
+                );
             ''')
         self.path.chmod(0o600)
 
@@ -63,6 +68,7 @@ class CaptureQueue:
     def connect(self):
         db=sqlite3.connect(self.path,timeout=2)
         db.row_factory=sqlite3.Row
+        db.execute('PRAGMA secure_delete=ON')
         try:
             with db:yield db
         finally:db.close()
@@ -77,6 +83,8 @@ class CaptureQueue:
         clean=event.model_copy(update={'source':event.source.model_copy(update={'content':content})})
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            if db.execute("SELECT 1 FROM events WHERE turn_key=? AND status='forgotten' LIMIT 1",(turn_key,)).fetchone():
+                return {'accepted':False,'status':'forgotten','event_key':event_key}
             if db.execute("SELECT 1 FROM events WHERE turn_key=? AND status='private' LIMIT 1",(turn_key,)).fetchone():
                 private=True
             old=db.execute('SELECT body,status FROM events WHERE event_key=?',(event_key,)).fetchone()
@@ -110,6 +118,39 @@ class CaptureQueue:
             db.execute("UPDATE events SET status='saved',record_id=?,saved_at=?,last_error=NULL WHERE event_key=?",
                        (record_id,stamp(utcnow()),key))
 
+    def forget_turn(self,key):
+        with self.connect() as db:
+            db.execute("UPDATE events SET body=NULL,status='forgotten',last_error=NULL,record_id=NULL WHERE turn_key=?",(key,))
+        with self.connect() as db:
+            db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+
+    def purge_forgotten(self,store):
+        from .maintenance import fingerprint
+        markers=store._run('MATCH (f:ForgetMarker {namespace:$ns}) WHERE f.kind IN ["memory","source"] '
+                           'RETURN f.kind AS kind,f.fingerprint AS hash',ns=store.namespace)
+        if not markers:return 0
+        memories={r['hash'] for r in markers if r['kind']=='memory'}
+        sources={r['hash'] for r in markers if r['kind']=='source'}
+        signature=digest(sorted((r['kind'],r['hash']) for r in markers))
+        identity=digest([store.settings.neo4j_uri,store.settings.neo4j_database,store.namespace])
+        turns=set()
+        with self.connect() as db:
+            progress=db.execute('SELECT marker_signature,sequence FROM forget_cleanup WHERE identity=?',(identity,)).fetchone()
+            after=progress['sequence'] if progress and progress['marker_signature']==signature else 0
+            through=db.execute('SELECT coalesce(max(sequence),0) AS n FROM events').fetchone()['n']
+            for row in db.execute('SELECT turn_key,body FROM events WHERE body IS NOT NULL AND sequence>? AND sequence<=?',(after,through)):
+                if fingerprint(row['turn_key']) in memories:
+                    turns.add(row['turn_key']);continue
+                event=CaptureEvent.model_validate_json(row['body'])
+                identifier='capture-source:'+digest([event.origin,event.source.id])
+                if fingerprint(identifier) in sources:turns.add(row['turn_key'])
+        for key in turns:self.forget_turn(key)
+        with self.connect() as db:
+            db.execute('INSERT INTO forget_cleanup(identity,marker_signature,sequence) VALUES(?,?,?) '
+                       'ON CONFLICT(identity) DO UPDATE SET marker_signature=excluded.marker_signature,sequence=excluded.sequence',
+                       (identity,signature,through))
+        return len(turns)
+
     def failed(self,key,error):
         with self.connect() as db:
             attempts=db.execute('SELECT attempts FROM events WHERE event_key=?',(key,)).fetchone()['attempts']+1
@@ -138,6 +179,10 @@ class CaptureQueue:
 
 
 def archive_turn(store,turn_key,events):
+    from .maintenance import is_forgotten
+    from .errors import ForgottenError
+    if is_forgotten(store,'memory',turn_key):
+        raise ForgottenError('此采集轮次已永久遗忘')
     events=sorted(events,key=lambda e:(e.source.occurred_at,e.source.id))
     envelope={'capture_kind':'conversation_record','origin':events[0].origin,
               'conversation_id':events[0].source.conversation_id,'turn_id':events[0].turn_id,
@@ -186,21 +231,28 @@ def archive_turn(store,turn_key,events):
         content=legacy_content
     source=Source(id=source_id,content=content,role='tool',occurred_at=end,
                   conversation_id=events[0].origin+':'+conversation)
-    return store.apply(source,Extraction(experiences=[episode]))['record_ids'][0]
+    return store.apply(source,Extraction(experiences=[episode]),context=WriteContext(origin=events[0].origin,workspace=workspace or None))['record_ids'][0]
 
 
 def process_pending(queue,settings,*,now=None,store_factory=None):
-    from .errors import error_result
+    from .errors import ForgottenError,error_result
     from .store import MemoryStore
-    rows=queue.ready(now=now)
-    if not rows:return {'saved':0,'failed':0}
     store=None;saved=failed=0
     try:
+        # Run even with no queued events: saved outbox rows also retain text.
+        try:
+            store=(store_factory or MemoryStore)(settings)
+            queue.purge_forgotten(store)
+        except Exception:
+            if store is not None:store.close();store=None
+        rows=queue.ready(now=now)
         for row in rows:
             try:
                 if store is None:store=(store_factory or MemoryStore)(settings)
                 identifier=archive_turn(store,row['turn_key'],queue.turn(row['turn_key']))
                 queue.done(row['event_key'],identifier);saved+=1
+            except ForgottenError:
+                queue.forget_turn(row['turn_key'])
             except Exception as error:
                 # Queue status contains a safe diagnostic, never source contents
                 # or provider/driver strings that might contain credentials.

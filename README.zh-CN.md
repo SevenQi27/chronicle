@@ -21,6 +21,46 @@ Agent 可以回忆发生过什么、追溯某项认识的依据，并区分现�
 
 例如，Agent 可以通过同一个人，将“与小林露营遇雨”和“后来收到小林的读书会邀请”关联起来。“与小林相处比具体活动更重要”这项认识必须引用相应经历。之后如果更正经历，旧版本仍会保留，受影响的认识也会提示重新审视。
 
+## 多种表达检索与范围筛选
+
+`search` / `recall` 支持原问题加最多 3 个 `--alternative`。MCP 对应字段为 `alternatives`。所有表达使用同一时间、版本视角，按记忆合并去重，返回 `matched_queries`、逐查询 `matches` 和 `score_method: query_rrf`。查询词由宿主提供，不额外调用模型；这能改善用词覆盖，但不保证完全不同措辞的语义召回。
+
+```sh
+uv run chronicle recall "项目决定" --alternative "发布安排" \
+  --workspace /absolute/project --conversation-id codex:CHAT_ID
+uv run chronicle history --origin codex --workspace /absolute/project
+```
+
+`search`、`recall`、`neighbors`、`history` 均支持 `--origin`、`--workspace`、`--conversation-id`、`--source-id`；MCP 使用 `filters` 对象。条件精确匹配并按 AND 组合，不传则保留整个 namespace 的范围。这是检索筛选，不是权限控制：选中记忆的详情仍保留全部关联证据；精确状态只缩小展示证据，不把范围外已知的冲突伪装成确定结论。
+
+结构化 `remember` / `memory_write` 可在 `source` 同级传入 `"context": {"origin": "my-agent", "workspace": "/absolute/project"}`，会话取自 `source.conversation_id`。自动采集自行填写，会话 ID 带来源前缀，如 `codex:CHAT_ID`。升级后运行 `chronicle init --namespace YOUR_NAMESPACE`，为旧记录回填已有会话信息，并从旧采集快照恢复可确定的项目和来源；缺失信息不猜测，不匹配相应筛选。MCP 新工具定义需要重新加载连接。
+
+## 撤回、永久遗忘和备份恢复
+
+撤回隐藏一条逻辑记忆的全部版本，普通检索、详情、历史和图形页面不再返回；之后写入的新版本也保持撤回，直到显式恢复。历史时间查询同样遵守当前撤回状态。撤回不删除原文或其他记忆，依赖它的认识标记为 `needs_review`。管理时可用 `show` / `history --include-withdrawn` 显式查看。仅关联已撤回记忆的来源不进入近期提取上下文；仍关联其他未撤回记忆的共享来源继续保留原文。撤回期间的到期检查保持待处理，恢复后由 worker 按当时状态补处理；已经处理过的检查不会重放。
+
+```sh
+uv run chronicle visibility withdraw MEMORY_ID --reason "不再用于回答"
+uv run chronicle visibility restore MEMORY_ID
+uv run chronicle forget MEMORY_ID
+# 查看受影响记忆、额外记忆、关联、来源和版本数量后，提交返回的 token：
+uv run chronicle forget MEMORY_ID --confirmation TOKEN
+```
+
+可传逻辑 ID 或版本 ID；精确状态使用 `state:v2:["subject","key"]`，也可直接传 event ID。永久遗忘先预览实际影响范围。共享原始来源可能同时含有多条记忆，因此会纳入使用同一来源的记忆、依赖认识、相关关联版本及其来源回执、向量、到期检查和孤立实体。范围变化后旧 token 失效；只能执行用户已授权的范围。批量请求处理当前分区中匹配的 ID，响应列出实际解析到的目标。
+
+永久遗忘保留标识的哈希，阻止相同来源、记忆和关联重放；不能识别完全更换 ID 后提交的同义正文。升级后的采集 worker 下一轮会清空对应已保存或排队事件的正文，标记 `forgotten`，并拒绝后续重放；没有新排队事件时也执行清理。升级后需重启 worker，停止或离线的 worker 对应本地副本会等待下次清理。旧导出、宿主聊天、数据库事务日志和其他外部副本不在删除范围内；这是应用层删除，不保证介质取证层面的不可恢复。
+
+```sh
+uv run chronicle backup export /absolute/path/personal.json --namespace personal
+uv run chronicle backup validate /absolute/path/personal.json --namespace restored
+uv run chronicle backup restore /absolute/path/personal.json --namespace restored --confirmation TOKEN
+```
+
+备份包含分区的全部图数据：原文、来源回执、历史版本、实体、关系、检查、复核项、撤回状态、防重放哈希和已有向量。使用带版本号和 SHA-256 的 JSON；校验和用于检测损坏，不证明来源可信。导出文件未加密、权限为 `600`，不会覆盖已有文件；路径指 CLI/MCP 服务端本机路径。不包含采集 SQLite 队列、宿主聊天、凭据和数据库配置。
+
+恢复先校验格式、校验和、分区归属、标签、属性类型及关系端点，仅允许空目标分区。图数据在一个事务中导入，并在提交前核对节点和关系数量；保留逻辑和版本 ID，重映射带分区前缀的图 ID，不合并或覆盖既有数据和遗忘标记。向量索引在数据提交后建立，`vector_indexes_pending` 非空表示图已恢复，但相应索引需配置对应模型后运行 `reindex`。将旧备份恢复到新分区可能重新带回备份之后被遗忘的记忆。
+
 ## 快速开始
 
 需要 **Python 3.11+**、**uv** 和 **Neo4j**。项目自带的安装脚本支持 macOS/Linux，安装 Neo4j Community **5.26.33**，需要 **Java 21**。
@@ -153,6 +193,9 @@ CLI 与 MCP 共用输入模型、业务操作和存储逻辑。记忆命令从�
 | 获取当前时间、时区和 namespace | `now` | `memory_now` |
 | 查看和处理待确认内容 | `reviews` / `resolve` | `memory_reviews` / `memory_resolve_review` |
 | 查询精确状态及变化历史 | `state` / `timeline` | `memory_state` / `memory_timeline` |
+| 撤回 / 恢复可见性 | `visibility` | `memory_visibility` |
+| 预览 / 确认永久遗忘 | `forget` | `memory_forget` |
+| 导出 / 校验 / 恢复分区 | `backup` | `memory_backup` |
 | 处理到期检查 | `tick` | `memory_tick` |
 | 通过可选独立模型提取记忆 | `ingest` | `memory_ingest` |
 
@@ -282,7 +325,7 @@ JAVA_HOME=$(/usr/libexec/java_home -v 21) \
 
 Neo4j 使用数据库账号认证，连接凭据保存在 `.env`。namespace 用于数据分区，**不是授权边界**；持有数据库凭据的客户端具有该账号授予的权限。当前服务适用于本地或受控环境。
 
-宿主模型负责理解经历和形成认识。定期自主总结、长期压缩与遗忘、自动实体消歧尚未实现，大规模性能尚未得到验证。CLI 帮助、部分诊断信息和详细测试指南目前仍使用中文。
+宿主模型负责理解经历和形成认识。定期自主总结、长期压缩与自动遗忘策略、自动实体消歧尚未实现，大规模性能尚未得到验证。CLI 帮助、部分诊断信息和详细测试指南目前仍使用中文。
 
 ## 开发
 

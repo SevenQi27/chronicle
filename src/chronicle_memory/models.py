@@ -170,8 +170,19 @@ class Extraction(Model):
     associations: list[Association] = Field(default_factory=list, max_length=40)
 
 
+class WriteContext(Model):
+    origin: Text | None = None
+    workspace: Text | None = None
+
+
+class MemoryFilters(WriteContext):
+    conversation_id: Text | None = None
+    source_id: Text | None = None
+
+
 class WriteRequest(Extraction):
     source: Source
+    context: WriteContext | None = None
 
     @model_validator(mode="after")
     def nonempty(self):
@@ -180,11 +191,13 @@ class WriteRequest(Extraction):
         return self
 
     def extraction(self):
-        return Extraction.model_validate(self.model_dump(exclude={"source"}))
+        return Extraction.model_validate(self.model_dump(exclude={"source","context"}))
 
 
 class Query(Model):
     query: Text
+    alternatives: list[Text] = Field(default_factory=list,max_length=3,description='调用方提供的不同表达；原始查询始终保留，不调用额外模型')
+    filters: MemoryFilters | None = None
     subject: str | None = None
     at: AwareDatetime | None = None
     known_at: AwareDatetime | None = None
@@ -198,6 +211,7 @@ class NeighborsQuery(Model):
     at: AwareDatetime | None = None
     known_at: AwareDatetime | None = None
     limit: int = Field(default=12, ge=1, le=30)
+    filters: MemoryFilters | None = None
 
 
 class HistoryQuery(Model):
@@ -207,6 +221,8 @@ class HistoryQuery(Model):
     end: AwareDatetime | None = None
     known_at: AwareDatetime | None = None
     limit: int = Field(default=30, ge=1, le=100)
+    filters: MemoryFilters | None = None
+    include_withdrawn: bool = False
 
     @model_validator(mode="after")
     def valid_range(self):
@@ -240,6 +256,7 @@ class DetailQuery(Model):
     at: AwareDatetime | None = None
     known_at: AwareDatetime | None = None
     source_mode: Literal['full','summary'] = Field(default='full',description='full 返回全部来源正文；summary 保留全部来源标识/角色/时间/长度，省略来源正文，记忆正文仍完整')
+    include_withdrawn: bool = False
 
 
 class PageQuery(Model):
@@ -262,3 +279,20 @@ class ReviewResolution(Extraction):
 
 class ResolveReviewTool(ReviewResolution):
     review_id: Text
+
+
+class VisibilityRequest(Model):
+    memory_ids: list[Text] = Field(min_length=1,max_length=50)
+    action: Literal['withdraw','restore']
+    reason: str = ''
+
+
+class ForgetRequest(Model):
+    memory_ids: list[Text] = Field(min_length=1,max_length=50)
+    confirmation: str | None = Field(default=None,description='省略时仅预览；用户确认范围后提交预览 token')
+
+
+class BackupRequest(Model):
+    action: Literal['export','validate','restore']
+    path: Text
+    confirmation: str | None = None

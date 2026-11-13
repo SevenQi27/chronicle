@@ -193,6 +193,6 @@ async def test_framework_neutral_tools_validate_scope_and_parameters(scenario):
         assert result["result"]["memory"]["value"]=="张三"
         assert not (await tools.call("memory_state",{"subject":"项目 A","key":"owner","namespace":"other"}))["ok"]
         assert not (await tools.call("nonexistent",{}))["ok"]
-        assert len(tools.definitions())==13
+        assert {"memory_visibility","memory_forget","memory_backup"} <= {d["name"] for d in tools.definitions()}
     finally:
         await service.provider.close()

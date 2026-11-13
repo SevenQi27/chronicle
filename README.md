@@ -76,6 +76,48 @@ For multiple experiences and a supported understanding in one write, see [`examp
 
 For long evidence bundles, `chronicle show RECORD_ID --source-mode summary` returns the complete memory narrative plus every source's ID, role, timestamp, and character count, with `content_omitted=true`. Use `--source-mode full` to retrieve source text. The default remains `full`; summary mode does not impose a total response-size cap.
 
+## Search with alternative wording and an explicit scope
+
+The host can supply up to three `alternatives` alongside the original query. Chronicle runs them against the same time/revision view, merges results by memory, and reports `matched_queries`, per-query `matches`, and `score_method: query_rrf`. This requires no extra model. It improves coverage when the host supplies useful wording; it is not a guarantee of semantic recall without shared terms or entities.
+
+```sh
+uv run chronicle recall "project decisions" --alternative "release plan" \
+  --workspace /absolute/project --conversation-id codex:CHAT_ID
+uv run chronicle history --origin codex --workspace /absolute/project
+```
+
+`search`, `recall`, `neighbors`, and `history` accept `--origin`, `--workspace`, `--conversation-id`, and `--source-id`. Their MCP equivalents accept the same fields inside `filters`. Fields combine with AND and match exactly. Omitting filters preserves the namespace-wide scope. These are retrieval selectors, not access-control boundaries: detail reads retain all evidence attached to a selected memory. For exact states, filtering narrows displayed evidence without hiding a conflict known from another source.
+
+Structured writes may add `"context": {"origin": "my-agent", "workspace": "/absolute/project"}` next to `source`; the conversation comes from `source.conversation_id`. Automatic capture fills these fields itself and prefixes conversation IDs with the origin, for example `codex:CHAT_ID`. Run `chronicle init --namespace YOUR_NAMESPACE` after upgrading to backfill existing conversation metadata and recover project/origin metadata from legacy capture snapshots. Missing metadata is not guessed; records without a requested field do not match that filter. New tools require a reload of the MCP connection.
+
+## Withdraw, forget, and back up memories
+
+Withdrawal hides every version of a logical memory from ordinary retrieval, details, history, and the viewer. Later revisions of that memory stay withdrawn until restored. It applies even when a historical knowledge cutoff is used. It does not erase evidence or other memories; dependent understandings remain available with `needs_review` when their evidence was withdrawn. Explicit inspection is available through `show` / `history --include-withdrawn`. Sources linked only to withdrawn memories are excluded from recent extraction context; a shared source remains available while it supports another non-withdrawn memory, with its original text intact. Due checks remain pending during withdrawal and are processed on the next worker pass after restoration, using the then-current state; checks already processed are not replayed.
+
+```sh
+uv run chronicle visibility withdraw MEMORY_ID --reason "No longer use this memory"
+uv run chronicle visibility restore MEMORY_ID
+uv run chronicle forget MEMORY_ID
+# Inspect affected_memory_ids, additional_memory_ids, affected_association_ids,
+# source_count and revision_count, then use the returned token for that scope:
+uv run chronicle forget MEMORY_ID --confirmation TOKEN
+```
+
+Both logical IDs and version IDs are accepted. Exact-state keys use `state:v2:["subject","key"]`; a returned event ID is also accepted. Permanent forgetting first previews its full impact. A shared immutable source can contain several memories, so forgetting includes all memories that use it, dependent understandings, relevant association versions, their source receipts, embeddings, checks, and orphaned entities. The confirmation token changes when this impact changes. Only confirm a scope the user has authorized. A batch operates on matching IDs in the current namespace; its response lists the resolved targets.
+
+Forgetting retains hashed identifiers to reject replay of the same sources, memories, and associations. It cannot detect semantically identical text submitted under entirely new identifiers. Updated capture workers also clear corresponding saved/queued outbox bodies, mark those turns `forgotten`, and refuse subsequent replay. This cleanup happens on the next worker pass, including an otherwise idle pass; restart workers after upgrading. A stopped/offline worker leaves its local copy pending cleanup. Existing exports, host transcripts, database transaction logs, and external copies are not erased by this operation. This is application-level deletion, not a forensic secure-erasure guarantee.
+
+```sh
+uv run chronicle backup export /absolute/path/personal.json --namespace personal
+uv run chronicle backup validate /absolute/path/personal.json --namespace restored
+# Use the validation token for this destination namespace:
+uv run chronicle backup restore /absolute/path/personal.json --namespace restored --confirmation TOKEN
+```
+
+Backups contain the namespace's full graph: original sources, immutable receipts, all versions, entities, relations, temporal checks, reviews, withdrawal state, forgetting markers, and stored vectors. They use versioned JSON with SHA-256 integrity checking; the checksum detects corruption, not authenticity. Exports are unencrypted files created with mode `600` and never overwrite an existing file. Paths are local to the CLI/MCP server. The capture SQLite queue, host chat logs, credentials, and database configuration are outside the backup.
+
+Validation checks the format, checksum, namespace ownership, labels, property types, and relation endpoints. Restore requires an empty destination namespace, performs the graph import in one transaction, and checks node/relationship counts before commit. Stable memory and version IDs are preserved while namespace-specific graph IDs are remapped. Existing data, including forgetting markers, is never merged or overwritten. Vector index creation follows the data commit; a nonempty `vector_indexes_pending` means the graph is restored but those indexes still need `reindex` after configuring the corresponding model. Restoring an older export into a new namespace can intentionally bring back memories forgotten after that export.
+
 ## Explore your memory graph
 
 Start the local, read-only **Chronicle Observatory**:
@@ -153,6 +195,9 @@ The CLI and MCP share input models, business operations, and storage logic. Memo
 | Read the current time, timezone, and namespace | `now` | `memory_now` |
 | List or resolve review candidates | `reviews` / `resolve` | `memory_reviews` / `memory_resolve_review` |
 | Query exact state or its timeline | `state` / `timeline` | `memory_state` / `memory_timeline` |
+| Withdraw / restore visibility | `visibility` | `memory_visibility` |
+| Preview / confirm permanent forgetting | `forget` | `memory_forget` |
+| Export / validate / restore a namespace | `backup` | `memory_backup` |
 | Process due checks | `tick` | `memory_tick` |
 | Extract memories with an optional standalone model | `ingest` | `memory_ingest` |
 
@@ -282,7 +327,7 @@ JAVA_HOME=$(/usr/libexec/java_home -v 21) \
 
 Neo4j authenticates database accounts; `.env` holds the connection credentials. A namespace partitions data but is **not an authorization boundary**. Clients holding database credentials have that account's permissions. The current service is intended for local or controlled environments.
 
-The host model is responsible for interpreting experiences and forming understandings. Periodic autonomous synthesis, long-term compression/forgetting, and automatic entity disambiguation are not implemented. Large-scale performance has not been established. CLI help, some diagnostics, and the detailed testing guide currently remain in Chinese.
+The host model is responsible for interpreting experiences and forming understandings. Periodic autonomous synthesis, long-term compression and automatic retention policies, and automatic entity disambiguation are not implemented. Large-scale performance has not been established. CLI help, some diagnostics, and the detailed testing guide currently remain in Chinese.
 
 ## Development
 

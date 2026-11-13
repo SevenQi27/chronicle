@@ -1,6 +1,6 @@
 """Framework-neutral tools: the host owns the conversation and binds namespace."""
 
-from .models import DetailQuery, HistoryQuery, Model, NeighborsQuery, Query, ResolveReviewTool, ReviewsQuery, Source, StateQuery, TimelineQuery, WriteRequest
+from .models import BackupRequest, DetailQuery, ForgetRequest, HistoryQuery, Model, NeighborsQuery, Query, ResolveReviewTool, ReviewsQuery, Source, StateQuery, TimelineQuery, VisibilityRequest, WriteRequest
 
 
 class Empty(Model):
@@ -8,6 +8,9 @@ class Empty(Model):
 
 
 TOOLS = {
+    "memory_visibility": (VisibilityRequest, "撤回或恢复指定逻辑记忆的全部版本。withdraw 从普通检索和详情中隐藏，restore 恢复；不删除原文。"),
+    "memory_forget": (ForgetRequest, "永久遗忘：先省略 confirmation 预览共享来源、依赖认识等影响范围，获得用户对范围的明确授权后提交 token。删除全部版本和来源，保留哈希防止重放；外部备份及宿主聊天不在范围内。"),
+    "memory_backup": (BackupRequest, "导出、校验或恢复当前分区。path 是服务端本地文件；export 不覆盖已有文件，validate 校验完整性并返回恢复 token，restore 仅写入空分区。包含原文、全部版本和关系，不包含采集队列或数据库凭据。"),
     "memory_ingest": (Source, "从新用户消息或工具结果自动提取记忆。传入真实消息 ID 和时间；助手复述不是新事实。"),
     "memory_write": (WriteRequest, "用 experiences 保存完整经历、entities 连接人物主题；understandings 保存有经历依据的认识并区分原话与推测；associations 保存有证据和时间的关联。更新通过 replaces 引用最新版本。memories 用于精确属性、规则和计划。"),
     "memory_search": (Query, "搜索简短记忆索引。at 指事情时间；known_at 限制当时已知信息。可启用 interpret_time 解析时间。"),
@@ -45,7 +48,16 @@ class MemoryTools:
             if name == "memory_ingest":
                 result = await self.service.ingest(parsed)
             elif name == "memory_write":
-                result = await self.service.database(store.apply,parsed.source,parsed.extraction())
+                result = await self.service.database(store.apply,parsed.source,parsed.extraction(),context=parsed.context)
+            elif name == "memory_visibility":
+                from .maintenance import visibility
+                result = await self.service.database(visibility,store,**parsed.model_dump())
+            elif name == "memory_forget":
+                from .maintenance import forget
+                result = await self.service.database(forget,store,**parsed.model_dump())
+            elif name == "memory_backup":
+                from .backup import backup
+                result = await self.service.database(backup,store,**parsed.model_dump())
             elif name == "memory_search":
                 result = await self.service.search(parsed)
             elif name == "memory_context":
@@ -72,5 +84,5 @@ class MemoryTools:
             else:
                 result = await self.service.database(store.tick)
             return {"ok":True,"result":result}
-        except (ValueError,ProviderError,Neo4jError,DriverError) as error:
+        except (ValueError,OSError,ProviderError,Neo4jError,DriverError) as error:
             return error_result(error)
