@@ -128,7 +128,7 @@ uv run chronicle ui --namespace personal --port 8765
 
 Open <http://127.0.0.1:8765> and use the same namespace as your agent. The viewer connects to your configured Neo4j instance and displays actual memory revisions, entities, sources, and their relationships. It includes an orbiting 3D view, a time-based layout, text and type filters, and a detail panel for narratives and original evidence. Drag to rotate, scroll to zoom, or select nodes from the sidebar. Use Refresh to load newly written memories.
 
-The time slider filters **when records were learned**, not when the underlying experiences happened. It operates on the most recent 200 loaded memory revisions and their connections; it is not a complete historical state replay. Explicit associations use the current association view. Large graphs display a truncation notice. The viewer binds only to `127.0.0.1`, serves no write endpoints, and uses local assets without CDNs or additional frontend dependencies. Keep the command running while using the page; Ctrl+C stops the viewer without stopping Neo4j or MCP.
+The time slider filters **when records were learned**, not when the underlying experiences happened. The page loads all non-withdrawn memory revisions and their connections in the selected namespace, without a record-count cap. The slider filters these revisions; it is not a complete historical state replay. Explicit associations use the current association view. The viewer binds only to `127.0.0.1`, serves no write endpoints, and uses local assets without CDNs or additional frontend dependencies. Keep the command running while using the page; Ctrl+C stops the viewer without stopping Neo4j or MCP.
 
 ## Connect an agent
 

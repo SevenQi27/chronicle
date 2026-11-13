@@ -29,15 +29,18 @@ function positionNodes() {
   const records = graph.nodes.filter(n=>RECORD_KINDS.has(n.kind));
   const auxiliary = graph.nodes.filter(n=>!RECORD_KINDS.has(n.kind));
   records.forEach((n,i)=>{
-    const a=i*2.39996, radius=records.length===1 ? 0 : 70+Math.sqrt(i)*35;
+    const a=i*2.39996, radius=records.length===1 ? 0 : 65+Math.sqrt(i/Math.max(1,records.length-1))*215;
     n.orbit=[Math.cos(a)*radius,Math.sin(a*1.7)*Math.min(105,radius),Math.sin(a)*radius];
     n.timeline=[records.length===1?0:(new Date(n.recorded_at).getTime()-minTime)/Math.max(1,maxTime-minTime)*460-230,(i%3-1)*48,(i%5-2)*32];
   });
+  const parents=new Map();
+  graph.edges.forEach(e=>{const from=nodesById.get(e.from),to=nodesById.get(e.to);if(from&&to&&RECORD_KINDS.has(from.kind)&&!RECORD_KINDS.has(to.kind)){if(!parents.has(to.id))parents.set(to.id,[]);parents.get(to.id).push(from);}});
   auxiliary.forEach((n,i)=>{
-    const a=i/Math.max(1,auxiliary.length)*Math.PI*2-.65;
-    const ring=185+(Math.floor(i/12)%4)*38;
-    n.orbit=[Math.cos(a)*ring,Math.sin(a)*ring*.68,Math.sin(a*2+.3)*105];
-    const parent=graph.edges.map(e=>e.to===n.id ? nodesById.get(e.from):null).find(x=>x?.timeline);
+    const seed=hash(n.id),a=(seed%10000)/10000*Math.PI*2;
+    const linked=parents.get(n.id)||[],parent=linked[0];
+    const origin3d=linked.length ? [0,1,2].map(axis=>linked.reduce((sum,item)=>sum+item.orbit[axis],0)/linked.length) : [0,0,0];
+    const elevation=((seed>>>14)%1000)/500-1,distance=35+((seed>>>5)%60),horizontal=Math.sqrt(1-elevation*elevation);
+    n.orbit=[origin3d[0]+Math.cos(a)*horizontal*distance,origin3d[1]+elevation*distance,origin3d[2]+Math.sin(a)*horizontal*distance];
     const origin=parent?.timeline || [0,0,0];
     n.timeline=[origin[0]+Math.cos(a)*85,origin[1]+Math.sin(a)*100,origin[2]+Math.cos(a*1.3)*85];
   });
@@ -130,8 +133,8 @@ async function load() {
     $('namespace').textContent=graph.namespace;
     ['all',...Object.keys(NAMES)].forEach(k=>$(`count-${k}`).textContent=pad(k==='all'?graph.nodes.length:graph.nodes.filter(n=>n.kind===k).length));
     $('connection-label').textContent='已连接';$('status-dot').classList.remove('offline');
-    $('notice').classList.toggle('hidden',!graph.truncated);
-    $('notice').textContent=graph.truncated?`当前展示最近 ${graph.limit} 个记忆版本及其连接，共 ${graph.total_records} 个版本。时间筛选只作用于已加载记录。`:'';
+    $('notice').classList.add('hidden');
+    $('notice').textContent='';
     positionNodes();filterGraph();
   }catch(error){
     $('connection-label').textContent='连接中断';$('status-dot').classList.add('offline');
@@ -142,28 +145,16 @@ async function load() {
 function project(point) {
   const [x,y,z]=point, cy=Math.cos(yaw),sy=Math.sin(yaw),cp=Math.cos(pitch),sp=Math.sin(pitch);
   const rx=x*cy-z*sy,rz=x*sy+z*cy,ry=y*cp-rz*sp,depth=y*sp+rz*cp;
-  const perspective=700/(700+depth),scale=Math.min(width/650,height/540)*zoom;
+  const perspective=1100/(1100+depth),scale=Math.min(width/800,height/650)*zoom;
   return {x:width*.50+rx*perspective*scale,y:height*.59+ry*perspective*scale,scale:perspective*scale,z:depth};
 }
 function rgba(hex,alpha) {return `rgba(${parseInt(hex.slice(1,3),16)},${parseInt(hex.slice(3,5),16)},${parseInt(hex.slice(5,7),16)},${alpha})`;}
-function roundRect(x,y,w,h,r) {ctx.beginPath();ctx.roundRect(x,y,w,h,r);}
 function drawBackdrop(t) {
   for(let i=0;i<85;i++){
     const h=hash(`star-${i}`),x=(h%10000)/10000*width,y=((h>>>10)%10000)/10000*height;
     ctx.fillStyle=`rgba(157,194,188,${.10+(i%5)*.025})`;ctx.beginPath();ctx.arc(x,y,i%11===0?1:.6,0,Math.PI*2);ctx.fill();
   }
-  [150,230,310].forEach((radius,index)=>{
-    ctx.beginPath();
-    for(let i=0;i<=100;i++){const a=i/100*Math.PI*2,p=project([Math.cos(a)*radius,100,Math.sin(a)*radius]);i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y);}
-    ctx.strokeStyle=`rgba(128,190,168,${index===1?.13:.065})`;ctx.lineWidth=.6;ctx.stroke();
-  });
-  for(let i=0;i<8;i++){
-    const a=i/8*Math.PI*2,p=project([Math.cos(a)*315,100,Math.sin(a)*315]),q=project([Math.cos(a)*325,100,Math.sin(a)*325]);
-    ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(q.x,q.y);ctx.strokeStyle='#7cae9433';ctx.stroke();
-  }
-  const center=project([0,100,0]);
-  const halo=ctx.createRadialGradient(center.x,center.y,0,center.x,center.y,Math.min(width,height)*.37);
-  halo.addColorStop(0,'#8ce0b70a');halo.addColorStop(1,'#8ce0b700');ctx.fillStyle=halo;ctx.fillRect(0,0,width,height);
+
 }
 function draw(time) {
   const dt=Math.min(32,time-last||16);last=time;
@@ -173,12 +164,13 @@ function draw(time) {
     const target=n[layout];for(let i=0;i<3;i++)n.position[i]+=(target[i]-n.position[i])*.08;
     projection.set(n.id,project(n.position));
   });
-  const adjacent=new Set([selected]);visibleEdges.forEach(e=>{if(e.from===selected)adjacent.add(e.to);if(e.to===selected)adjacent.add(e.from);});
+  const focus=hovered||selected;
+  const adjacent=new Set([focus]);visibleEdges.forEach(e=>{if(e.from===focus)adjacent.add(e.to);if(e.to===focus)adjacent.add(e.from);});
   visibleEdges.forEach((e,index)=>{
     const a=projection.get(e.from),b=projection.get(e.to);if(!a||!b)return;
-    const isRelated=e.from===selected||e.to===selected,alpha=isRelated?.34:.10;
+    const isRelated=e.from===focus||e.to===focus,alpha=isRelated?.62:(visible.length>100?.065:.12);
     const bend=18+Math.abs(a.x-b.x)*.05,cx=(a.x+b.x)/2,cy=(a.y+b.y)/2-bend;
-    ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.quadraticCurveTo(cx,cy,b.x,b.y);ctx.strokeStyle=rgba(COLORS[nodesById.get(e.to).kind],alpha);ctx.lineWidth=isRelated?1:.65;ctx.stroke();
+    ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.quadraticCurveTo(cx,cy,b.x,b.y);ctx.strokeStyle=rgba(COLORS[nodesById.get(e.to).kind],alpha);ctx.lineWidth=isRelated?1.1:.55;ctx.stroke();
     if(!reducedMotion&&isRelated){const f=(time*.00009+index*.23)%1,x=(1-f)**2*a.x+2*(1-f)*f*cx+f*f*b.x,y=(1-f)**2*a.y+2*(1-f)*f*cy+f*f*b.y;ctx.fillStyle='#c1efd2a0';ctx.beginPath();ctx.arc(x,y,1.5,0,Math.PI*2);ctx.fill();}
     if(isRelated && (e.from===hovered||e.to===hovered)){
       ctx.font='8px -apple-system, sans-serif';ctx.textAlign='center';ctx.fillStyle='#719b8c';ctx.fillText(RELATIONS[e.kind]||e.kind,cx,cy-5);
@@ -187,23 +179,28 @@ function draw(time) {
   const labelBoxes=[];
   [...visible].sort((a,b)=>projection.get(b.id).z-projection.get(a.id).z).forEach(n=>{
     const p=projection.get(n.id),active=n.id===selected,hover=n.id===hovered,col=COLORS[n.kind];
-    const base=RECORD_KINDS.has(n.kind)?21:12,r=Math.max(4,base*p.scale)*(active?1.12:1);
+    // Small flat light points: perspective changes depth, not a ball's volume.
+    const base=RECORD_KINDS.has(n.kind)?2:1.25;
+    const r=active?3.5:hover?3:Math.max(.85,Math.min(2.6,base*p.scale));
     p.radius=r;
-    ctx.globalAlpha=matches.has(n.id)?1:.37;
-    if(selected&&!adjacent.has(n.id))ctx.globalAlpha*=.5;
-    const glow=ctx.createRadialGradient(p.x,p.y,r*.4,p.x,p.y,r*(active?5:3));glow.addColorStop(0,rgba(col,active?.20:.10));glow.addColorStop(1,rgba(col,0));ctx.fillStyle=glow;ctx.beginPath();ctx.arc(p.x,p.y,r*5,0,Math.PI*2);ctx.fill();
-    if(active||hover){ctx.strokeStyle=rgba(col,.35);ctx.lineWidth=.7;ctx.beginPath();ctx.arc(p.x,p.y,r+7,0,Math.PI*2);ctx.stroke();ctx.save();ctx.translate(p.x,p.y);ctx.rotate(time*.00007);ctx.setLineDash([3,8]);ctx.beginPath();ctx.ellipse(0,0,r+17,r+13,-.4,0,Math.PI*2);ctx.strokeStyle=rgba(col,.21);ctx.stroke();ctx.restore();}
-    const sphere=ctx.createRadialGradient(p.x-r*.32,p.y-r*.4,r*.05,p.x,p.y,r*1.13);sphere.addColorStop(0,'#e9fff3');sphere.addColorStop(.18,col);sphere.addColorStop(.52,rgba(col,.6));sphere.addColorStop(1,'#132c2b');
-    ctx.fillStyle=sphere;ctx.beginPath();ctx.arc(p.x,p.y,r,0,Math.PI*2);ctx.fill();ctx.strokeStyle=rgba(col,.65);ctx.lineWidth=.7;ctx.stroke();
-    ctx.beginPath();ctx.ellipse(p.x,p.y,r*.95,r*.30,-.5,0,Math.PI*2);ctx.strokeStyle=rgba(col,.25);ctx.stroke();
+    ctx.globalAlpha=matches.has(n.id)?1:.4;
+    if(focus&&!adjacent.has(n.id))ctx.globalAlpha*=.65;
+    ctx.shadowBlur=active||hover?10:0;ctx.shadowColor=col;
+    ctx.fillStyle=active||hover?'#e6fff3':col;
+    ctx.beginPath();ctx.arc(p.x,p.y,r,0,Math.PI*2);ctx.fill();
+    ctx.shadowBlur=0;
+    if(active||hover){
+      ctx.strokeStyle=rgba(col,.55);ctx.lineWidth=.7;
+      ctx.beginPath();ctx.arc(p.x,p.y,r+4,0,Math.PI*2);ctx.stroke();
+    }
     if(visible.length<35||active||hover){
       const title=n.title.length>19?n.title.slice(0,18)+'…':n.title;ctx.font=`${active?'500 ':'400 '}${active?11:10}px -apple-system, "PingFang SC", sans-serif`;
       const w=ctx.measureText(title).width+19,x=Math.max(8,Math.min(width-w-8,p.x-w/2));
       let y=p.y+r+14;
       for(let attempt=0;attempt<6 && labelBoxes.some(b=>x<b.x+b.w+5&&x+w+5>b.x&&y<b.y+b.h+5&&y+24+5>b.y);attempt++)y+=29;
       labelBoxes.push({x,y,w,h:active?43:24});
-      roundRect(x,y,w,24,5);ctx.fillStyle=active?'#152a25e8':'#111c20c9';ctx.fill();ctx.strokeStyle=rgba(col,active?.3:.12);ctx.lineWidth=.6;ctx.stroke();
-      ctx.textAlign='center';ctx.fillStyle=active?'#d5eddf':'#9fbab3';ctx.fillText(title,x+w/2,y+15);
+      ctx.textAlign='center';ctx.strokeStyle='#0b1116';ctx.lineWidth=4;ctx.strokeText(title,x+w/2,y+15);
+      ctx.fillStyle=active?'#d5eddf':'#9fbab3';ctx.fillText(title,x+w/2,y+15);
       if(active){ctx.font='7px ui-monospace, monospace';ctx.fillStyle='#6c9b86';ctx.fillText(`${NAMES[n.kind]} / ${n.recorded_at?formatDate(n.recorded_at):n.payload.category||'ENTITY'}`,x+w/2,y+38);}
     }
     ctx.globalAlpha=1;
@@ -211,7 +208,16 @@ function draw(time) {
   requestAnimationFrame(draw);
 }
 function resize() {const rect=$('canvas-area').getBoundingClientRect();width=rect.width;height=rect.height;const dpr=Math.min(devicePixelRatio||1,2);canvas.width=width*dpr;canvas.height=height*dpr;ctx.setTransform(dpr,0,0,dpr,0,0);}
-function hit(event) {const r=canvas.getBoundingClientRect(),x=event.clientX-r.left,y=event.clientY-r.top;return [...visible].sort((a,b)=>projection.get(a.id)?.z-projection.get(b.id)?.z).find(n=>{const p=projection.get(n.id);return p&&Math.hypot(p.x-x,p.y-y)<Math.max(17,p.radius+9);});}
+function hit(event) {
+  const bounds=canvas.getBoundingClientRect(),x=event.clientX-bounds.left,y=event.clientY-bounds.top;
+  let nearest=null,best=Infinity,depth=Infinity;
+  for(const node of visible){
+    const p=projection.get(node.id);if(!p)continue;
+    const distance=Math.hypot(p.x-x,p.y-y);
+    if(distance<=Math.max(10,p.radius+5)&&(distance<best||(distance===best&&p.z<depth))){nearest=node;best=distance;depth=p.z;}
+  }
+  return nearest;
+}
 function setRotation(value){rotating=value;$('rotate').setAttribute('aria-pressed',String(value));$('rotate').replaceChildren(document.createTextNode(value?'Ⅱ ':'▷ '),element('span','',value?'暂停旋转':'自动旋转'));}
 canvas.addEventListener('pointerdown',e=>{pointer={x:e.clientX,y:e.clientY,startX:e.clientX,startY:e.clientY,moved:false};canvas.setPointerCapture(e.pointerId);$('tooltip').classList.add('hidden');});
 canvas.addEventListener('pointermove',e=>{

@@ -12,16 +12,13 @@ from .models import stamp, state_key
 from .store import MemoryStore
 
 
-def graph_snapshot(store, limit=200):
+def graph_snapshot(store):
     """Keep actual revision IDs and evidence edges; the slider filters knowledge time."""
     view=store.capture_view()
     params={'ns':store.namespace,'revision':view.revision,'known':stamp(view.known_at)}
-    total=store._run('MATCH (r:MemoryRecord {namespace:$ns}) '
-        'WHERE r.seq<=$revision AND r.recorded_at<=datetime($known) AND NOT coalesce(r.withdrawn,false) '
-        'RETURN count(r) AS total',**params)[0]['total']
     rows=store._run('MATCH (r:MemoryRecord {namespace:$ns}) '
         'WHERE r.seq<=$revision AND r.recorded_at<=datetime($known) AND NOT coalesce(r.withdrawn,false) '
-        'RETURN properties(r) AS r ORDER BY r.seq DESC LIMIT $limit',limit=limit,**params)
+        'RETURN properties(r) AS r ORDER BY r.seq DESC',**params)
     nodes={}; latest={}; uids=[]
     for item in rows:
         r=item['r']; payload=json.loads(r['body']); uid=r['uid']; uids.append(uid)
@@ -59,7 +56,7 @@ def graph_snapshot(store, limit=200):
                     'explanation':link['explanation'],'recorded_at':link['recorded_at']})
     return {'namespace':store.namespace,'timezone':store.settings.timezone,'revision':view.revision,
         'captured_at':stamp(view.known_at),'nodes':list(nodes.values()),'edges':edges,
-        'total_records':total,'limit':limit,'truncated':total>len(rows)}
+        'total_records':len(rows),'limit':None,'truncated':False}
 
 
 def make_server(store, port=8765):
