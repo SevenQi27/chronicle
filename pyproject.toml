@@ -5,14 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "chronicle-memory"
 version = "0.3.0"
-description = "Neo4j-backed episodic memory, evidence-linked understanding, and temporal recall for agents."
+description = "Local SQLite memory for agents with evidence and revision history."
 requires-python = ">=3.11"
 dependencies = [
-  "httpx>=0.27,<1",
-  "python-dotenv>=1,<2",
   "pydantic>=2.11,<3",
   "mcp==2.3.0",
-  "neo4j>=5.26,<7",
 ]
 
 [dependency-groups]

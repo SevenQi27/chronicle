@@ -1,4 +1,6 @@
-"""Errors shared by CLI and MCP adapters."""
+"""Structured errors for the SQLite MCP and CLI."""
+
+import sqlite3
 
 
 class ConflictError(ValueError):
@@ -8,31 +10,13 @@ class ConflictError(ValueError):
         self.details = details
 
 
-class ForgottenError(ValueError):
-    pass
-
-
-class NotInitializedError(RuntimeError):
-    pass
-
-
-EXIT_CODES = {'invalid_arguments':2,'unknown_tool':2,'version_conflict':3,
-              'source_conflict':3,'provider_error':4,'storage_error':4,'not_initialized':4,'memory_forgotten':3}
-
-
 def error_result(error):
-    from neo4j.exceptions import DriverError, Neo4jError
-    from .provider import ProviderError
-    if isinstance(error,ConflictError):
-        detail={'code':error.code,'message':str(error),**error.details}
-    elif isinstance(error,ForgottenError):
-        detail={'code':'memory_forgotten','message':str(error)}
-    elif isinstance(error,NotInitializedError):
-        detail={'code':'not_initialized','message':str(error)}
-    elif isinstance(error,ProviderError):
-        detail={'code':'provider_error','message':str(error)}
-    elif isinstance(error,(DriverError,Neo4jError)):
-        detail={'code':'storage_error','message':'Neo4j 操作失败，请检查数据库服务和连接配置'}
+    if isinstance(error, ConflictError):
+        detail = {'code': error.code, 'message': str(error), **error.details}
+    elif isinstance(error, sqlite3.OperationalError) and str(error) == 'no such module: fts5':
+        detail = {'code': 'storage_error', 'message': '当前 Python 的 SQLite 未启用 FTS5'}
+    elif isinstance(error, (sqlite3.Error, OSError)):
+        detail = {'code': 'storage_error', 'message': '无法读取或写入 SQLite 数据库'}
     else:
-        detail={'code':'invalid_arguments','message':str(error)}
-    return {'ok':False,'error':detail}
+        detail = {'code': 'invalid_arguments', 'message': str(error)}
+    return {'ok': False, 'error': detail}
