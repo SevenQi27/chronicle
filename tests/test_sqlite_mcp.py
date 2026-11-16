@@ -4,11 +4,15 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+from threading import Thread
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 import pytest
 
 from chronicle_memory import cli
 from chronicle_memory.sqlite_mcp import SCHEMA, ExperienceWrite, RecallQuery, SQLiteExperiences
+from chronicle_memory.ui import ledger_snapshot, make_server
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -95,3 +99,62 @@ def test_migrated_understanding_expiry_respects_the_same_instant(tmp_path, expir
         row = conn.execute("SELECT valid_to, body FROM chronicle_experience WHERE record_id='version-1'").fetchone()
         assert row['valid_to'] == ('2026-11-16T01:00:00.000000+00:00' if expiry else None)
         assert row['body'] == body
+
+
+def test_ledger_ui_snapshot_and_http_server(tmp_path):
+    path = tmp_path / 'ui.sqlite3'
+    store = SQLiteExperiences(path, 'personal')
+
+    first = store.write(ExperienceWrite.model_validate({
+        'source': {'id': 'msg-1', 'content': '极光评审定在三楼', 'occurred_at': '2026-11-12T08:00:00Z',
+                   'conversation_id': 'conv-1'},
+        'context': {'workspace': '/repo/aurora', 'origin': 'codex'},
+        'experiences': [{
+            'id': 'aurora-meeting', 'title': '极光评审安排', 'narrative': '极光评审在三楼会议室。',
+            'entities': [{'id': 'aurora', 'name': '极光评审', 'aliases': ['北辰碰头']}],
+        }],
+    }))
+    second = store.write(ExperienceWrite.model_validate({
+        'source': {'id': 'msg-2', 'content': '更正：改到五楼', 'occurred_at': '2026-11-16T08:00:00Z',
+                   'conversation_id': 'conv-1'},
+        'context': {'workspace': '/repo/aurora', 'origin': 'codex'},
+        'experiences': [{
+            'id': 'aurora-meeting', 'title': '极光评审变更', 'narrative': '极光评审改在五楼会议室。',
+            'replaces': first['record_ids'][0], 'revision_kind': 'correct',
+            'entities': [{'id': 'aurora', 'name': '极光评审', 'aliases': ['北辰碰头']}],
+        }],
+    }))
+
+    snap_now = ledger_snapshot(store)
+    assert snap_now['logical_count'] == 1
+    assert snap_now['total_versions'] == 2
+    mem = snap_now['memories'][0]
+    assert mem['record_id'] == second['record_ids'][0]
+    assert mem['version_count'] == 2 and mem['has_correction'] is True
+    assert snap_now['facets']['entities'][0]['aliases'] == ['北辰碰头']
+
+    snap_past = ledger_snapshot(store, known_at=first['recorded_at'])
+    assert snap_past['memories'][0]['record_id'] == first['record_ids'][0]
+    assert snap_past['memories'][0]['version_count'] == 1
+
+    with make_server(store, 0) as server:
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f'http://127.0.0.1:{server.server_port}'
+        try:
+            for route, mime in (('/', 'text/html'), ('/app.js', 'text/javascript'), ('/style.css', 'text/css')):
+                with urlopen(base + route) as resp:
+                    assert resp.status == 200
+                    assert resp.headers['Content-Type'].startswith(mime)
+                    assert resp.read()
+            with urlopen(base + '/api/ledger') as resp:
+                data = json.load(resp)
+                assert data['ok'] is True
+                assert data['result']['namespace'] == 'personal'
+                assert data['result']['logical_count'] == 1
+            with pytest.raises(HTTPError) as exc:
+                urlopen(Request(base + '/api/ledger', headers={'Host': 'evil.example'}))
+            assert exc.value.code == 403
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)

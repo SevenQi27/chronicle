@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chronicle · 认知账本与时间机器</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Bar: Search & Dual Time Scrubber -->
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-dot"></span>
+        <div class="brand-text">
+          <h1>Chronicle</h1>
+          <span class="badge-ns" id="ns-badge">namespace: default</span>
+        </div>
+      </div>
+
+      <div class="search-box">
+        <svg class="search-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+          <circle cx="8.5" cy="8.5" r="5.5" />
+          <path d="M13 13l4 4" stroke-linecap="round" />
+        </svg>
+        <input id="search-input" type="search" placeholder="搜索经历、认识、实体别名或原话… (按 / 聚焦)" autocomplete="off" />
+        <kbd class="search-shortcut" id="clear-search" title="清空过滤">ESC</kbd>
+      </div>
+
+      <div class="time-machine">
+        <div class="tm-header">
+          <span class="tm-title">获知时间机器 (<code>known_at</code>)</span>
+          <span class="tm-value" id="tm-label">当前视角 (Now)</span>
+        </div>
+        <div class="tm-controls">
+          <input id="tm-slider" type="range" min="0" max="0" value="0" step="1" />
+          <button id="tm-reset" class="btn-ghost" type="button" hidden>回到现在</button>
+          <button id="btn-demo-toggle" class="btn-ghost" type="button" title="当数据库为空或想体验完整特性时，切换内置示例账本">示例预览</button>
+          <button id="btn-refresh" class="btn-secondary" type="button" title="从 SQLite 重新加载">刷新</button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main 3-Column Master-Detail Layout -->
+    <main class="workspace">
+      <!-- Left Column: Scope & Entity Facets -->
+      <aside class="sidebar-left">
+        <section class="facet-section">
+          <h2 class="facet-heading">认知视图</h2>
+          <div class="nav-list" id="kind-filters">
+            <button type="button" class="nav-item active" data-kind="all">
+              <span>全部记忆</span>
+              <span class="count-pill" id="count-all">0</span>
+            </button>
+            <button type="button" class="nav-item" data-kind="experience">
+              <span>经历 (Experience)</span>
+              <span class="count-pill" id="count-experience">0</span>
+            </button>
+            <button type="button" class="nav-item" data-kind="understanding">
+              <span>认识 (Understanding)</span>
+              <span class="count-pill" id="count-understanding">0</span>
+            </button>
+            <button type="button" class="nav-item" data-kind="revised">
+              <span>含版本更正 (Revised)</span>
+              <span class="count-pill" id="count-revised">0</span>
+            </button>
+            <button type="button" class="nav-item" data-kind="needs_review">
+              <span>待重新审视 (Review)</span>
+              <span class="count-pill warn" id="count-review">0</span>
+            </button>
+          </div>
+        </section>
+
+        <section class="facet-section">
+          <div class="facet-heading-row">
+            <h2 class="facet-heading">上下文范围</h2>
+            <button type="button" class="link-reset" id="reset-scope" hidden>重置</button>
+          </div>
+          <div class="scope-group">
+            <label class="scope-label" for="select-workspace">工作区 (Workspace)</label>
+            <select id="select-workspace" class="scope-select">
+              <option value="">全部工作区</option>
+            </select>
+          </div>
+          <div class="scope-group">
+            <label class="scope-label" for="select-conversation">会话 (Conversation)</label>
+            <select id="select-conversation" class="scope-select">
+              <option value="">全部会话</option>
+            </select>
+          </div>
+        </section>
+
+        <section class="facet-section facet-entities">
+          <div class="facet-heading-row">
+            <h2 class="facet-heading">人物与主题实体</h2>
+            <button type="button" class="link-reset" id="reset-entity" hidden>清除</button>
+          </div>
+          <div class="entity-list" id="entity-list"></div>
+        </section>
+      </aside>
+
+      <!-- Center Column: Memory Stream -->
+      <section class="stream-center">
+        <div class="stream-toolbar">
+          <div class="stream-status" id="stream-status">正在加载记忆账本…</div>
+          <div class="stream-legend">
+            <span class="legend-item"><i class="dot dot-exp"></i>经历</span>
+            <span class="legend-item"><i class="dot dot-explicit"></i>明确认识</span>
+            <span class="legend-item"><i class="dot dot-inferred"></i>归纳推测</span>
+          </div>
+        </div>
+        <div class="memory-list" id="memory-list" role="listbox" aria-label="记忆列表"></div>
+      </section>
+
+      <!-- Right Column: Evidence & Revision Diff Inspector -->
+      <aside class="inspector-right" id="inspector">
+        <div class="inspector-empty" id="inspector-empty">
+          <p class="empty-title">选择一条记忆查看证据链与版本演进</p>
+          <p class="empty-sub">这里将展示 Git 风格的版本 Diff、支撑该认识的经历，以及不可篡改的原始对话来源。</p>
+        </div>
+        <div class="inspector-content" id="inspector-content" hidden></div>
+      </aside>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
