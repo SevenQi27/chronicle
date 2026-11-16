@@ -174,6 +174,67 @@ def ledger_snapshot(store: SQLiteExperiences, known_at=None, at=None):
     }
 
 
+def graph_snapshot(store: SQLiteExperiences):
+    now = stamp(utcnow())
+    with store.connection() as conn:
+        conn.execute('BEGIN')
+        rows = conn.execute(
+            'SELECT record_id, logical_id, record_kind, recorded_at, body, evidence_ids '
+            'FROM chronicle_experience WHERE namespace=? AND recorded_at<=? ORDER BY seq DESC',
+            (store.namespace, now),
+        ).fetchall()
+        sources = {
+            row['id']: json.loads(row['body'])
+            for row in conn.execute('SELECT id, body FROM chronicle_source WHERE namespace=?', (store.namespace,))
+        }
+
+    nodes, latest = {}, {}
+    for row in rows:
+        payload = json.loads(row['body'])
+        identifier = row['record_id']
+        latest.setdefault(row['logical_id'], identifier)
+        nodes[identifier] = {
+            'id': identifier, 'record_id': identifier, 'logical_id': row['logical_id'],
+            'kind': row['record_kind'], 'title': payload['title'],
+            'text': payload.get('narrative', payload.get('statement', '')),
+            'recorded_at': row['recorded_at'], 'payload': payload,
+        }
+
+    edges = []
+    for row in rows:
+        identifier = row['record_id']
+        payload = nodes[identifier]['payload']
+        for source_id in json.loads(row['evidence_ids']):
+            source = sources.get(source_id)
+            if source is None:
+                continue
+            key = 'source:' + source_id
+            nodes.setdefault(key, {
+                'id': key, 'kind': 'source', 'payload': source, 'text': source['content'],
+                'title': {'user': '用户原话', 'tool': '工具结果', 'assistant': '助手记录'}.get(source['role'], '原始来源'),
+                'recorded_at': source['occurred_at'],
+            })
+            edges.append({'from': identifier, 'to': key, 'kind': 'EVIDENCED_BY'})
+        for entity in payload.get('entities', []):
+            key = 'entity:' + entity['id']
+            nodes.setdefault(key, {
+                'id': key, 'kind': 'entity', 'title': entity['name'], 'text': entity['name'], 'payload': entity,
+            })
+            edges.append({'from': identifier, 'to': key, 'kind': 'INVOLVES'})
+        for reference in payload.get('support_record_ids') or payload.get('supports', []):
+            target = reference if reference in nodes else latest.get(reference)
+            if target in nodes:
+                edges.append({'from': identifier, 'to': target, 'kind': 'SUPPORTED_BY'})
+        if payload.get('replaces') in nodes:
+            kind = 'CORRECTS' if payload.get('revision_kind') == 'correct' else 'REVISES'
+            edges.append({'from': identifier, 'to': payload['replaces'], 'kind': kind})
+
+    return {
+        'namespace': store.namespace, 'captured_at': now, 'nodes': list(nodes.values()),
+        'edges': edges, 'total_records': len(rows), 'limit': None, 'truncated': False,
+    }
+
+
 def make_server(store: SQLiteExperiences, port=8765):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -205,7 +266,11 @@ def make_server(store: SQLiteExperiences, port=8765):
                 known_at = params.get('known_at', [None])[0]
                 at = params.get('at', [None])[0]
                 try:
-                    result = {'ok': True, 'result': ledger_snapshot(store, known_at=known_at, at=at)}
+                    snapshot = (
+                        graph_snapshot(store) if path == '/api/graph'
+                        else ledger_snapshot(store, known_at=known_at, at=at)
+                    )
+                    result = {'ok': True, 'result': snapshot}
                     status = 200
                 except (sqlite3.Error, ValueError, OSError) as error:
                     result = error_result(error)
@@ -216,7 +281,11 @@ def make_server(store: SQLiteExperiences, port=8765):
                     'application/json; charset=utf-8',
                 )
                 return
-            assets = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css'}
+            assets = {
+                '/': 'graph/index.html', '/graph': 'graph/index.html',
+                '/graph/app.js': 'graph/app.js', '/graph/style.css': 'graph/style.css',
+                '/ledger': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css',
+            }
             if path not in assets:
                 self.respond(404, b'Not found', 'text/plain; charset=utf-8')
                 return
@@ -232,7 +301,7 @@ def serve_ui(path, namespace='default', port=8765):
         raise ValueError('--port 必须在 0–65535 之间')
     store = SQLiteExperiences(path, namespace)
     with make_server(store, port) as server:
-        print(f'Chronicle Ledger UI: http://127.0.0.1:{server.server_port}  (namespace: {store.namespace})', flush=True)
+        print(f'Chronicle UI: http://127.0.0.1:{server.server_port}/  (namespace: {store.namespace})', flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:

@@ -147,6 +147,16 @@ def test_ledger_ui_snapshot_and_http_server(tmp_path):
                     assert resp.status == 200
                     assert resp.headers['Content-Type'].startswith(mime)
                     assert resp.read()
+            with urlopen(base + '/') as resp:
+                assert b'<canvas id="graph"' in resp.read()
+            with urlopen(base + '/ledger') as resp:
+                assert b'id="tm-slider"' in resp.read()
+            with urlopen(base + '/api/graph') as resp:
+                graph = json.load(resp)['result']
+                assert graph['total_records'] == 2 and not graph['truncated']
+                assert {first['record_ids'][0], second['record_ids'][0]} <= {node['id'] for node in graph['nodes']}
+                assert {'from': second['record_ids'][0], 'to': first['record_ids'][0], 'kind': 'CORRECTS'} in graph['edges']
+                assert {'from': first['record_ids'][0], 'to': 'source:msg-1', 'kind': 'EVIDENCED_BY'} in graph['edges']
             with urlopen(base + '/api/ledger') as resp:
                 data = json.load(resp)
                 assert data['ok'] is True
