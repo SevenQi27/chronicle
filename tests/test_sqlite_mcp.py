@@ -13,7 +13,7 @@ import pytest
 from chronicle_memory import cli
 from chronicle_memory.models import DetailQuery, VisibilityRequest
 from chronicle_memory.sqlite_mcp import SCHEMA, ExperienceWrite, RecallQuery, SQLiteExperiences
-from chronicle_memory.ui import graph_snapshot, ledger_snapshot, make_server
+from chronicle_memory.ui import graph_snapshot, make_server
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -36,6 +36,38 @@ def test_mcp_path_defaults_and_override(tmp_path, monkeypatch, sqlite_option):
         args.extend(['--sqlite', str(tmp_path / 'chosen.sqlite3')])
     monkeypatch.setattr(sys, 'argv', args)
     cli.main()
+
+
+def test_ui_uses_effective_mcp_path_and_namespace(tmp_path, monkeypatch):
+    def codex_lookup(command, **kwargs):
+        assert command == ['codex', 'mcp', 'get', 'chronicle', '--json']
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
+            'enabled': True,
+            'transport': {'type': 'stdio', 'args': ['mcp', '--sqlite', 'db.sqlite3', '--namespace=earnbyai'],
+                          'cwd': str(tmp_path)},
+        }))
+
+    started = []
+    monkeypatch.setattr(cli.subprocess, 'run', codex_lookup)
+    monkeypatch.setattr(cli, 'serve_ui', lambda path, namespace, port: started.append((path, namespace, port)))
+    monkeypatch.setattr(sys, 'argv', ['chronicle', 'ui'])
+    cli.main()
+    monkeypatch.setattr(sys, 'argv', ['chronicle', 'ui', '--namespace', 'personal'])
+    cli.main()
+    assert started == [(tmp_path / 'db.sqlite3', 'earnbyai', 8765), (tmp_path / 'db.sqlite3', 'personal', 8765)]
+
+
+def test_ui_explicit_connection_skips_config_lookup(tmp_path, monkeypatch):
+    def fail_if_read():
+        pytest.fail('显式指定库和分区时无需读取 MCP 配置')
+
+    started = []
+    path = tmp_path / 'other.sqlite3'
+    monkeypatch.setattr(cli, 'mcp_transport', fail_if_read)
+    monkeypatch.setattr(cli, 'serve_ui', lambda path, namespace, port: started.append((path, namespace, port)))
+    monkeypatch.setattr(sys, 'argv', ['chronicle', 'ui', '--sqlite', str(path), '--namespace', 'other'])
+    cli.main()
+    assert started == [(path, 'other', 8765)]
 
 
 def test_existing_database_indexes_both_versions(tmp_path):
@@ -103,9 +135,6 @@ def test_withdrawal_hides_new_versions_and_preserves_shared_evidence(tmp_path):
         event_ids=[first, revision], include_withdrawn=True,
     )))
     assert [item['record_id'] for item in store.recall(RecallQuery(query='会议'))['results']] == [other]
-    ledger = ledger_snapshot(store)
-    assert [item['record_id'] for item in ledger['memories']] == [other]
-    assert 'shared-source' in {source['id'] for source in ledger['memories'][0]['sources']}
     graph = graph_snapshot(store)
     graph_ids = {node['id'] for node in graph['nodes']}
     assert graph_ids.isdisjoint({first, revision})
@@ -160,7 +189,7 @@ def test_migrated_understanding_expiry_respects_the_same_instant(tmp_path, expir
         assert row['body'] == body
 
 
-def test_ledger_ui_snapshot_and_http_server(tmp_path):
+def test_graph_ui_and_http_server(tmp_path):
     path = tmp_path / 'ui.sqlite3'
     store = SQLiteExperiences(path, 'personal')
 
@@ -184,45 +213,35 @@ def test_ledger_ui_snapshot_and_http_server(tmp_path):
         }],
     }))
 
-    snap_now = ledger_snapshot(store)
-    assert snap_now['logical_count'] == 1
-    assert snap_now['total_versions'] == 2
-    mem = snap_now['memories'][0]
-    assert mem['record_id'] == second['record_ids'][0]
-    assert mem['version_count'] == 2 and mem['has_correction'] is True
-    assert snap_now['facets']['entities'][0]['aliases'] == ['北辰碰头']
-
-    snap_past = ledger_snapshot(store, known_at=first['recorded_at'])
-    assert snap_past['memories'][0]['record_id'] == first['record_ids'][0]
-    assert snap_past['memories'][0]['version_count'] == 1
-
     with make_server(store, 0) as server:
         thread = Thread(target=server.serve_forever, daemon=True)
         thread.start()
         base = f'http://127.0.0.1:{server.server_port}'
         try:
-            for route, mime in (('/', 'text/html'), ('/app.js', 'text/javascript'), ('/style.css', 'text/css')):
+            for route, mime in (('/', 'text/html'), ('/graph/app.js', 'text/javascript'), ('/graph/style.css', 'text/css')):
                 with urlopen(base + route) as resp:
                     assert resp.status == 200
                     assert resp.headers['Content-Type'].startswith(mime)
                     assert resp.read()
             with urlopen(base + '/') as resp:
                 assert b'<canvas id="graph"' in resp.read()
-            with urlopen(base + '/ledger') as resp:
-                assert b'id="tm-slider"' in resp.read()
+            for removed in ('/ledger', '/api/ledger', '/app.js', '/style.css'):
+                with pytest.raises(HTTPError) as exc:
+                    urlopen(base + removed)
+                assert exc.value.code == 404
             with urlopen(base + '/api/graph') as resp:
-                graph = json.load(resp)['result']
+                data = json.load(resp)
+                assert data['ok'] is True
+                graph = data['result']
+                assert graph['namespace'] == 'personal'
                 assert graph['total_records'] == 2 and not graph['truncated']
                 assert {first['record_ids'][0], second['record_ids'][0]} <= {node['id'] for node in graph['nodes']}
                 assert {'from': second['record_ids'][0], 'to': first['record_ids'][0], 'kind': 'CORRECTS'} in graph['edges']
                 assert {'from': first['record_ids'][0], 'to': 'source:msg-1', 'kind': 'EVIDENCED_BY'} in graph['edges']
-            with urlopen(base + '/api/ledger') as resp:
-                data = json.load(resp)
-                assert data['ok'] is True
-                assert data['result']['namespace'] == 'personal'
-                assert data['result']['logical_count'] == 1
+                entity = next(node for node in graph['nodes'] if node['id'] == 'entity:aurora')
+                assert entity['payload']['aliases'] == ['北辰碰头']
             with pytest.raises(HTTPError) as exc:
-                urlopen(Request(base + '/api/ledger', headers={'Host': 'evil.example'}))
+                urlopen(Request(base + '/api/graph', headers={'Host': 'evil.example'}))
             assert exc.value.code == 403
         finally:
             server.shutdown()

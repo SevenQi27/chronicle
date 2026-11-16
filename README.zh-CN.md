@@ -23,6 +23,8 @@ chronicle mcp --sqlite /absolute/path/memory.sqlite3 --namespace personal
 
 重启时沿用同一文件路径和分区即可读回已有记忆。已有 Chronicle SQLite 库会在启动时自动补建全文索引。
 
+运行 `chronicle ui` 会沿用当前 Chronicle MCP 配置中的库路径和分区。显式指定的 `--sqlite` 或 `--namespace` 优先。浏览器打开 <http://127.0.0.1:8765/> 查看 3D 图谱。
+
 ## MCP 工具
 
 | 工具 | 用途 |

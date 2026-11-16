@@ -1,177 +1,14 @@
-"""Loopback-only, read-only memory ledger & time-machine viewer over SQLite."""
+"""Loopback-only, read-only memory graph over SQLite."""
 
-from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 import json
 import sqlite3
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 from .errors import error_result
 from .models import stamp, utcnow
 from .sqlite_mcp import SQLiteExperiences, WITHDRAWN_MEMORY
-
-
-def ledger_snapshot(store: SQLiteExperiences, known_at=None, at=None):
-    """Build a complete ledger snapshot over SQLite with revision chains, entities, and sources."""
-    now = stamp(utcnow())
-    known_cutoff = stamp(datetime.fromisoformat(known_at)) if known_at else now
-    effective_cutoff = stamp(datetime.fromisoformat(at)) if at else now
-    with store.connection() as conn:
-        all_rows = conn.execute(
-            'SELECT seq, record_id, logical_id, source_id, recorded_at, effective_at, valid_to, body, '
-            'origin, workspace, conversation_id, evidence_ids, record_kind '
-            f'FROM chronicle_experience AS r WHERE namespace=? AND NOT {WITHDRAWN_MEMORY} ORDER BY seq ASC',
-            (store.namespace,),
-        ).fetchall()
-        source_rows = conn.execute(
-            'SELECT id, body FROM chronicle_source WHERE namespace=?',
-            (store.namespace,),
-        ).fetchall()
-
-    sources_by_id = {row['id']: json.loads(row['body']) for row in source_rows}
-    checkpoints = sorted({row['recorded_at'] for row in all_rows})
-
-    visible_rows = [row for row in all_rows if row['recorded_at'] <= known_cutoff]
-    by_logical = {}
-    records_by_id = {}
-
-    for row in visible_rows:
-        payload = json.loads(row['body'])
-        record_id = row['record_id']
-        logical_id = row['logical_id']
-        kind = row['record_kind']
-        evidence_ids = json.loads(row['evidence_ids'])
-        sources = [sources_by_id[sid] for sid in evidence_ids if sid in sources_by_id]
-        valid_to = row['valid_to']
-        expired = valid_to is not None and valid_to <= effective_cutoff
-        is_effective = (
-            (row['effective_at'] is None or row['effective_at'] <= effective_cutoff)
-            and not expired
-        )
-        item = {
-            'seq': row['seq'],
-            'record_id': record_id,
-            'logical_id': logical_id,
-            'record_kind': kind,
-            'title': payload['title'],
-            'summary': payload.get('narrative', payload.get('statement', '')),
-            'narrative': payload.get('narrative', payload.get('statement', '')),
-            'when': payload.get('when', {'precision': 'unknown', 'description': ''}),
-            'basis': payload.get('basis'),
-            'supports': payload.get('support_record_ids') or payload.get('supports', []),
-            'entities': payload.get('entities', []),
-            'replaces': payload.get('replaces'),
-            'revision_kind': payload.get('revision_kind', 'update'),
-            'recorded_at': row['recorded_at'],
-            'effective_at': row['effective_at'],
-            'valid_to': valid_to,
-            'effective': is_effective,
-            'expired': expired,
-            'origin': row['origin'],
-            'workspace': row['workspace'],
-            'conversation_id': row['conversation_id'],
-            'source_id': row['source_id'],
-            'evidence_ids': evidence_ids,
-            'sources': sources,
-        }
-        by_logical.setdefault(logical_id, []).append(item)
-        records_by_id[record_id] = item
-
-    memories = []
-    entity_map = {}
-    workspaces = set()
-    origins = set()
-    conversations = set()
-
-    for logical_id, versions in by_logical.items():
-        for idx, ver in enumerate(versions, 1):
-            ver['version_number'] = idx
-            ver['superseded'] = idx < len(versions)
-        head = versions[-1]
-        if head['workspace']:
-            workspaces.add(head['workspace'])
-        if head['origin']:
-            origins.add(head['origin'])
-        if head['conversation_id']:
-            conversations.add(head['conversation_id'])
-
-        for ent in head.get('entities', []):
-            eid = ent['id']
-            entry = entity_map.setdefault(eid, {
-                'id': eid,
-                'name': ent['name'],
-                'category': ent.get('category', 'topic'),
-                'aliases': [],
-                'count': 0,
-            })
-            entry['name'] = ent['name']
-            entry['category'] = ent.get('category', entry['category'])
-            for alias in ent.get('aliases', []):
-                if alias not in entry['aliases']:
-                    entry['aliases'].append(alias)
-            entry['count'] += 1
-
-        # Determine if an understanding's supporting experience was updated/corrected
-        needs_review = False
-        if head['record_kind'] == 'understanding':
-            for sup_ref in head.get('supports', []):
-                if sup_ref in records_by_id and records_by_id[sup_ref]['superseded']:
-                    needs_review = True
-
-        memories.append({
-            **head,
-            'version_count': len(versions),
-            'has_correction': any(v['revision_kind'] == 'correct' for v in versions[1:]),
-            'needs_review': needs_review,
-            'revisions': versions,
-        })
-
-    # Compute 1-hop neighbors (shared entities or evidence support links)
-    for mem in memories:
-        mem_entity_ids = {e['id'] for e in mem.get('entities', [])}
-        neighbors = []
-        for other in memories:
-            if other['logical_id'] == mem['logical_id']:
-                continue
-            reasons = []
-            shared = [e['name'] for e in other.get('entities', []) if e['id'] in mem_entity_ids]
-            if shared:
-                reasons.append({'kind': 'shared_entity', 'label': '共同实体: ' + '、'.join(shared)})
-            if other['record_id'] in mem.get('supports', []) or other['logical_id'] in mem.get('supports', []):
-                reasons.append({'kind': 'supports', 'label': '支撑经历'})
-            if mem['record_id'] in other.get('supports', []) or mem['logical_id'] in other.get('supports', []):
-                reasons.append({'kind': 'supported_by', 'label': '衍生认识'})
-            if reasons:
-                neighbors.append({
-                    'logical_id': other['logical_id'],
-                    'record_id': other['record_id'],
-                    'title': other['title'],
-                    'record_kind': other['record_kind'],
-                    'reasons': reasons,
-                })
-        mem['neighbors'] = neighbors[:8]
-
-    memories.sort(key=lambda m: (m['recorded_at'], m['seq']), reverse=True)
-    entities = sorted(entity_map.values(), key=lambda e: (-e['count'], e['name']))
-
-    return {
-        'namespace': store.namespace,
-        'captured_at': now,
-        'known_at': known_cutoff,
-        'at': effective_cutoff,
-        'total_versions': len(all_rows),
-        'visible_versions': len(visible_rows),
-        'logical_count': len(memories),
-        'checkpoints': checkpoints,
-        'facets': {
-            'workspaces': sorted(workspaces),
-            'origins': sorted(origins),
-            'conversations': sorted(conversations),
-            'entities': entities,
-        },
-        'memories': memories,
-    }
 
 
 def graph_snapshot(store: SQLiteExperiences):
@@ -260,18 +97,10 @@ def make_server(store: SQLiteExperiences, port=8765):
             if self.headers.get('Host') not in allowed:
                 self.respond(403, b'Forbidden', 'text/plain; charset=utf-8')
                 return
-            parsed = urlsplit(self.path)
-            path = parsed.path
-            if path in ('/api/ledger', '/api/graph'):
-                params = parse_qs(parsed.query)
-                known_at = params.get('known_at', [None])[0]
-                at = params.get('at', [None])[0]
+            path = urlsplit(self.path).path
+            if path == '/api/graph':
                 try:
-                    snapshot = (
-                        graph_snapshot(store) if path == '/api/graph'
-                        else ledger_snapshot(store, known_at=known_at, at=at)
-                    )
-                    result = {'ok': True, 'result': snapshot}
+                    result = {'ok': True, 'result': graph_snapshot(store)}
                     status = 200
                 except (sqlite3.Error, ValueError, OSError) as error:
                     result = error_result(error)
@@ -285,7 +114,6 @@ def make_server(store: SQLiteExperiences, port=8765):
             assets = {
                 '/': 'graph/index.html', '/graph': 'graph/index.html',
                 '/graph/app.js': 'graph/app.js', '/graph/style.css': 'graph/style.css',
-                '/ledger': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css',
             }
             if path not in assets:
                 self.respond(404, b'Not found', 'text/plain; charset=utf-8')

@@ -23,6 +23,8 @@ chronicle mcp --sqlite /absolute/path/memory.sqlite3 --namespace personal
 
 Use the same path and namespace after restarting to read the same memories. Existing Chronicle SQLite databases are indexed automatically on startup.
 
+`chronicle ui` uses the database and namespace from the configured Chronicle MCP connection. Explicit `--sqlite` and `--namespace` options take precedence. Open <http://127.0.0.1:8765/> for the 3D graph.
+
 ## MCP tools
 
 | Tool | Use |
