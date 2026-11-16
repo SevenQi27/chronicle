@@ -1,12 +1,14 @@
 from datetime import datetime
+import json
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 
 import pytest
 
 from chronicle_memory import cli
-from chronicle_memory.sqlite_mcp import ExperienceWrite, RecallQuery, SQLiteExperiences
+from chronicle_memory.sqlite_mcp import SCHEMA, ExperienceWrite, RecallQuery, SQLiteExperiences
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -53,3 +55,43 @@ def test_existing_database_indexes_both_versions(tmp_path):
     assert [item['record_id'] for item in current] == second['record_ids']
     assert [item['record_id'] for item in historical] == first['record_ids']
     assert store.recall(RecallQuery(query='三楼'))['results'] == []
+
+
+@pytest.mark.parametrize('expiry', [
+    '2026-11-16T09:00:00+08:00',
+    '2026-11-16T01:00:00Z',
+    '2026-11-15T20:00:00-05:00',
+    None,
+])
+def test_migrated_understanding_expiry_respects_the_same_instant(tmp_path, expiry):
+    path = tmp_path / 'old.sqlite3'
+    body = json.dumps({
+        'id': 'insight', 'title': '会议安排', 'statement': '议题尚未确认',
+        'basis': 'inferred', 'valid_to': expiry,
+    }, ensure_ascii=False)
+    with sqlite3.connect(path) as conn:
+        conn.executescript(SCHEMA)
+        conn.execute("ALTER TABLE chronicle_experience ADD COLUMN record_kind TEXT NOT NULL DEFAULT 'experience'")
+        conn.execute("INSERT INTO chronicle_source VALUES ('test','s1','{}','{}','{}')")
+        conn.execute(
+            "INSERT INTO chronicle_experience(namespace, record_id, logical_id, source_id, recorded_at, "
+            "body, terms, conversation_id, evidence_ids, record_kind) "
+            "VALUES ('test','version-1','insight','s1','2026-11-15T00:00:00.000000+00:00',"
+            "?,?,'default','[\"s1\"]','understanding')",
+            (body, json.dumps(['会议', '安排'])),
+        )
+
+    store = SQLiteExperiences(path, 'test')
+    for at, visible in [
+        ('2026-11-16T00:59:59.999999+00:00', True),
+        ('2026-11-16T01:00:00+00:00', expiry is None),
+        ('2026-11-16T01:00:00.000001+00:00', expiry is None),
+    ]:
+        results = store.recall(RecallQuery(query='会议安排', at=datetime.fromisoformat(at)))['results']
+        assert [r['record_id'] for r in results] == (['version-1'] if visible else [])
+
+    reopened = SQLiteExperiences(path, 'test')
+    with reopened.connection() as conn:
+        row = conn.execute("SELECT valid_to, body FROM chronicle_experience WHERE record_id='version-1'").fetchone()
+        assert row['valid_to'] == ('2026-11-16T01:00:00.000000+00:00' if expiry else None)
+        assert row['body'] == body

@@ -2,6 +2,7 @@
 
 import asyncio
 from contextlib import closing, contextmanager
+from datetime import datetime
 from heapq import nlargest
 import json
 import os
@@ -86,6 +87,17 @@ class SQLiteExperiences:
             columns = {row['name'] for row in conn.execute('PRAGMA table_info(chronicle_experience)')}
             if 'record_kind' not in columns:
                 conn.execute("ALTER TABLE chronicle_experience ADD COLUMN record_kind TEXT NOT NULL DEFAULT 'experience'")
+            if 'valid_to' not in columns:
+                conn.execute('ALTER TABLE chronicle_experience ADD COLUMN valid_to TEXT')
+                # Write a UTC projection once, while preserving the imported body.
+                dated = conn.execute(
+                    "SELECT seq, json_extract(body, '$.valid_to') AS expires "
+                    "FROM chronicle_experience WHERE record_kind='understanding' "
+                    "AND json_extract(body, '$.valid_to') IS NOT NULL"
+                ).fetchall()
+                conn.executemany('UPDATE chronicle_experience SET valid_to=? WHERE seq=?', [
+                    (stamp(datetime.fromisoformat(row['expires'])), row['seq']) for row in dated
+                ])
             self.initialize_search_index(conn)
 
     @staticmethod
@@ -191,8 +203,7 @@ class SQLiteExperiences:
             WHERE chronicle_experience_fts MATCH ? AND r.seq=chronicle_experience_fts.rowid
               AND r.namespace=? AND r.recorded_at<=?
               AND (r.effective_at IS NULL OR r.effective_at<=?)
-              AND (r.record_kind='experience' OR json_extract(r.body,'$.valid_to') IS NULL
-                   OR json_extract(r.body,'$.valid_to')>?)
+              AND (r.valid_to IS NULL OR r.valid_to>?)
               AND r.seq=(
                   SELECT newer.seq FROM chronicle_experience AS newer
                   WHERE newer.namespace=r.namespace AND newer.logical_id=r.logical_id AND newer.recorded_at<=?
