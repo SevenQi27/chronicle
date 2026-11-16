@@ -82,12 +82,15 @@ class SQLiteExperiences:
             pass
         with self.connection() as conn:
             conn.executescript(SCHEMA)
+            conn.execute('BEGIN IMMEDIATE')
+            columns = {row['name'] for row in conn.execute('PRAGMA table_info(chronicle_experience)')}
+            if 'record_kind' not in columns:
+                conn.execute("ALTER TABLE chronicle_experience ADD COLUMN record_kind TEXT NOT NULL DEFAULT 'experience'")
             self.initialize_search_index(conn)
 
     @staticmethod
     def initialize_search_index(conn):
         # Backfill once and install the insert trigger in the same transaction.
-        conn.execute('BEGIN IMMEDIATE')
         if conn.execute("SELECT 1 FROM sqlite_master WHERE name='chronicle_experience_fts'").fetchone():
             return
         conn.execute(
@@ -142,10 +145,12 @@ class SQLiteExperiences:
             )
             for experience, record_id in zip(request.experiences, record_ids):
                 head = conn.execute(
-                    'SELECT record_id, evidence_ids FROM chronicle_experience '
+                    'SELECT record_id, evidence_ids, record_kind FROM chronicle_experience '
                     'WHERE namespace=? AND logical_id=? ORDER BY seq DESC LIMIT 1',
                     (self.namespace, experience.id),
                 ).fetchone()
+                if head and head['record_kind'] != 'experience':
+                    raise ValueError('已有记录是认识，请使用另一个经历 ID')
                 if head and experience.replaces != head['record_id']:
                     raise ConflictError('version_conflict', '请读取最新版本再更新这条记忆',
                                         current_record_id=head['record_id'], memory_id=experience.id)
@@ -181,18 +186,20 @@ class SQLiteExperiences:
 
     def candidates(self, conn, match, at, known_at, filters):
         sql = """
-            SELECT r.seq, r.record_id, r.source_id, r.recorded_at, r.body, r.terms
+            SELECT r.seq, r.record_id, r.source_id, r.recorded_at, r.body, r.terms, r.record_kind
             FROM chronicle_experience_fts CROSS JOIN chronicle_experience AS r
             WHERE chronicle_experience_fts MATCH ? AND r.seq=chronicle_experience_fts.rowid
               AND r.namespace=? AND r.recorded_at<=?
               AND (r.effective_at IS NULL OR r.effective_at<=?)
+              AND (r.record_kind='experience' OR json_extract(r.body,'$.valid_to') IS NULL
+                   OR json_extract(r.body,'$.valid_to')>?)
               AND r.seq=(
                   SELECT newer.seq FROM chronicle_experience AS newer
                   WHERE newer.namespace=r.namespace AND newer.logical_id=r.logical_id AND newer.recorded_at<=?
                   ORDER BY newer.seq DESC LIMIT 1
               )
         """
-        args = [match, self.namespace, known_at, at, known_at]
+        args = [match, self.namespace, known_at, at, at, known_at]
         if filters:
             for field in ('origin', 'workspace', 'conversation_id'):
                 value = getattr(filters, field)
@@ -220,13 +227,17 @@ class SQLiteExperiences:
         results = []
         for score, _, row, matched_queries in ranked:
             experience = json.loads(row['body'])
-            results.append({
-                'record_id': row['record_id'], 'record_kind': 'experience', 'id': experience['id'],
-                'title': experience['title'], 'summary': experience['narrative'][:320],
-                'status': 'active', 'when': experience['when'], 'recorded_at': row['recorded_at'],
+            kind = row['record_kind']
+            result = {
+                'record_id': row['record_id'], 'record_kind': kind, 'id': experience['id'],
+                'title': experience['title'], 'summary': experience.get('narrative', experience.get('statement', ''))[:320],
+                'status': 'active', 'when': experience.get('when'), 'recorded_at': row['recorded_at'],
                 'source_id': row['source_id'], 'score': score, 'match_scope': 'current',
                 'matched_record_ids': [row['record_id']], 'matched_queries': matched_queries,
-            })
+            }
+            if kind == 'understanding':
+                result['basis'] = experience['basis']
+            results.append(result)
         return {'status': 'ok', 'at': at, 'known_at': known_at, 'results': results}
 
     @staticmethod
@@ -236,7 +247,7 @@ class SQLiteExperiences:
                 experience = json.loads(row['body'])
                 if subject not in (experience['title'], experience['id']) and not any(
                     subject in (entity['id'], entity['name'], *entity['aliases'])
-                    for entity in experience['entities']
+                    for entity in experience.get('entities', [])
                 ):
                     continue
             terms = set(json.loads(row['terms']))
@@ -269,7 +280,7 @@ class SQLiteExperiences:
                         source['content_omitted'] = True
                 result.append({
                     **json.loads(row['body']), 'event_id': record_id, 'record_id': record_id,
-                    'record_kind': 'experience', 'source_id': row['source_id'], 'source': sources[0],
+                    'record_kind': row['record_kind'], 'source_id': row['source_id'], 'source': sources[0],
                     'sources': sources, 'source_count': len(sources), 'source_mode': request.source_mode,
                     'recorded_at': row['recorded_at'], 'at': at, 'known_at': known_at,
                     'superseded': head['record_id'] != record_id or bool(row['effective_at'] and row['effective_at'] > at),
