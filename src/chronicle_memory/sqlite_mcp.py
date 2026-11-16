@@ -1,4 +1,4 @@
-"""SQLite and stdio MCP for writing, recalling and correcting sourced experiences."""
+"""SQLite and stdio MCP for sourced experiences and understandings."""
 
 import asyncio
 from contextlib import closing, contextmanager
@@ -14,11 +14,11 @@ from uuid import uuid4
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool, ToolAnnotations
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from . import __version__
 from .errors import ConflictError, error_result
-from .models import DetailQuery, Experience, Model, Query, Source, WriteContext, stamp, utcnow
+from .models import DetailQuery, Experience, Model, Query, Source, Understanding, WriteContext, stamp, utcnow
 
 
 def tokens(text):
@@ -32,8 +32,15 @@ def tokens(text):
 
 class ExperienceWrite(Model):
     source: Source
-    experiences: list[Experience] = Field(min_length=1)
+    experiences: list[Experience] = Field(default_factory=list)
     context: WriteContext | None = None
+    understandings: list[Understanding] = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def require_records(self):
+        if not (self.experiences or self.understandings):
+            raise ValueError('至少填写一条经历或认识')
+        return self
 
 
 class RecallQuery(Query):
@@ -132,9 +139,14 @@ class SQLiteExperiences:
 
     def write(self, request):
         source = request.source
-        if source.role == 'assistant':
-            raise ValueError('助手复述不能作为新经历的来源')
-        payload = request.model_dump_json()
+        if source.role == 'assistant' and (request.experiences or any(
+            item.basis == 'explicit' for item in request.understandings
+        )):
+            raise ValueError('助手复述不能作为新经历或明确表达的来源')
+        # Experience-only requests must still match receipts written before this field existed.
+        payload = request.model_dump_json(exclude=None if request.understandings else {'understandings'})
+        records = [*request.experiences, *request.understandings]
+        context = request.context or WriteContext()
         with self.connection() as conn:
             conn.execute('BEGIN IMMEDIATE')
             receipt = conn.execute(
@@ -146,7 +158,7 @@ class SQLiteExperiences:
                     raise ConflictError('source_conflict', '相同来源 ID 已用于不同写入', source_id=source.id)
                 return json.loads(receipt['result'])
             recorded_at = stamp(utcnow())
-            record_ids = [str(uuid4()) for _ in request.experiences]
+            record_ids = [str(uuid4()) for _ in records]
             result = {
                 'source_id': source.id, 'event_ids': record_ids, 'record_ids': record_ids,
                 'association_ids': [], 'review_ids': [], 'status': 'applied', 'recorded_at': recorded_at,
@@ -155,36 +167,68 @@ class SQLiteExperiences:
                 'INSERT INTO chronicle_source VALUES (?, ?, ?, ?, ?)',
                 (self.namespace, source.id, source.model_dump_json(), payload, json.dumps(result)),
             )
-            for experience, record_id in zip(request.experiences, record_ids):
+            for item, record_id in zip(records, record_ids):
+                kind = 'experience' if isinstance(item, Experience) else 'understanding'
                 head = conn.execute(
                     'SELECT record_id, evidence_ids, record_kind FROM chronicle_experience '
                     'WHERE namespace=? AND logical_id=? ORDER BY seq DESC LIMIT 1',
-                    (self.namespace, experience.id),
+                    (self.namespace, item.id),
                 ).fetchone()
-                if head and head['record_kind'] != 'experience':
-                    raise ValueError('已有记录是认识，请使用另一个经历 ID')
-                if head and experience.replaces != head['record_id']:
+                if head and head['record_kind'] != kind:
+                    raise ValueError('同一记忆 ID 不能改变类型')
+                if head and item.replaces != head['record_id']:
                     raise ConflictError('version_conflict', '请读取最新版本再更新这条记忆',
-                                        current_record_id=head['record_id'], memory_id=experience.id)
-                if not head and experience.replaces:
+                                        current_record_id=head['record_id'], memory_id=item.id)
+                if not head and item.replaces:
                     raise ValueError('replaces 与此记忆 ID 不匹配')
+
+                body = item.model_dump(mode='json')
+                valid_to = None
+                if isinstance(item, Experience):
+                    effective_at = item.when.start
+                    additional_sources = item.source_ids
+                    search_text = [item.title, item.narrative]
+                    for entity in item.entities:
+                        search_text.extend([entity.id, entity.name, *entity.aliases])
+                else:
+                    effective_at = item.valid_from
+                    valid_to = stamp(item.valid_to) if item.valid_to else None
+                    body['support_record_ids'] = self.support_record_ids(conn, item.supports)
+                    additional_sources = []
+                    search_text = [item.title, item.statement]
+
                 previous = json.loads(head['evidence_ids']) if head else []
-                evidence_ids = list(dict.fromkeys([source.id, *experience.source_ids, *previous]))
+                evidence_ids = list(dict.fromkeys([source.id, *additional_sources, *previous]))
                 self.sources(conn, evidence_ids)
-                search_text = [experience.title, experience.narrative]
-                for entity in experience.entities:
-                    search_text.extend([entity.id, entity.name, *entity.aliases])
-                context = request.context or WriteContext()
                 conn.execute(
                     'INSERT INTO chronicle_experience (namespace, record_id, logical_id, source_id, '
-                    'recorded_at, effective_at, body, terms, origin, workspace, conversation_id, evidence_ids) '
-                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                    (self.namespace, record_id, experience.id, source.id, recorded_at,
-                     stamp(experience.when.start) if experience.when.start else None,
-                     experience.model_dump_json(), json.dumps(tokens(' '.join(search_text))),
-                     context.origin, context.workspace, source.conversation_id, json.dumps(evidence_ids)),
+                    'recorded_at, effective_at, body, terms, origin, workspace, conversation_id, evidence_ids, '
+                    'record_kind, valid_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (self.namespace, record_id, item.id, source.id, recorded_at,
+                     stamp(effective_at) if effective_at else None,
+                     json.dumps(body, ensure_ascii=False, separators=(',', ':')), json.dumps(tokens(' '.join(search_text))),
+                     context.origin, context.workspace, source.conversation_id, json.dumps(evidence_ids),
+                     kind, valid_to),
                 )
         return result
+
+    def support_record_ids(self, conn, references):
+        record_ids = []
+        for reference in dict.fromkeys(references):
+            support = conn.execute(
+                'SELECT record_id, record_kind FROM chronicle_experience WHERE namespace=? AND record_id=?',
+                (self.namespace, reference),
+            ).fetchone()
+            if support is None:
+                support = conn.execute(
+                    'SELECT record_id, record_kind FROM chronicle_experience WHERE namespace=? AND logical_id=? '
+                    'ORDER BY seq DESC LIMIT 1',
+                    (self.namespace, reference),
+                ).fetchone()
+            if support is None or support['record_kind'] != 'experience':
+                raise ValueError(f"supports 必须引用当前分区中已有的经历：{reference}")
+            record_ids.append(support['record_id'])
+        return list(dict.fromkeys(record_ids))
 
     def sources(self, conn, identifiers):
         rows = conn.execute(
@@ -301,10 +345,10 @@ class SQLiteExperiences:
 
 def build_server(store):
     operations = {
-        'memory_write': (ExperienceWrite, store.write, '保存带来源的经历。更正时沿用经历 ID，replaces 填当前记录的 record_id。'),
-        'memory_search': (RecallQuery, store.recall, '按关键词、实体名称和已保存的别名检索经历。可传 alternatives。'),
-        'memory_context': (RecallQuery, store.recall, '检索相关经历的短摘要与 record_id，按需使用 memory_details。'),
-        'memory_details': (DetailQuery, store.details, '按版本 ID 读取经历和来源，旧版本可独立查看。'),
+        'memory_write': (ExperienceWrite, store.write, '保存带来源的经历或认识。认识的 supports 必须引用已有经历。更正时沿用记忆 ID，replaces 填当前版本的 record_id。'),
+        'memory_search': (RecallQuery, store.recall, '按关键词、实体名称和已保存的别名检索经历及认识。可传 alternatives。'),
+        'memory_context': (RecallQuery, store.recall, '检索相关记忆的短摘要与 record_id，按需使用 memory_details。'),
+        'memory_details': (DetailQuery, store.details, '按版本 ID 读取记忆与来源。用认识的 support_record_ids 继续查看支撑经历及其原文。'),
     }
     async def list_tools(context, params):
         return ListToolsResult(tools=[
@@ -327,8 +371,9 @@ def build_server(store):
                               structuredContent=result, isError=not result['ok'])
 
     instructions = (
-        'SQLite 模式。使用 memory_write 保存带来源的经历，memory_search 或 memory_context 检索摘要，'
-        'memory_details 查阅来源。更正时先查询当前记录，沿用经历 ID、为新原话提供新来源 ID，'
+        'SQLite 模式。使用 memory_write 保存带来源的经历或认识，认识必须引用支撑经历。'
+        '使用 memory_search 或 memory_context 检索摘要，memory_details 查阅来源和支撑经历版本。'
+        '更正时先查询当前记录，沿用记忆 ID、为新原话提供新来源 ID，'
         '并用 replaces 引用当前记录的 record_id。'
     )
     return Server('chronicle-memory', version=__version__, instructions=instructions,

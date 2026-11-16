@@ -74,6 +74,24 @@ class Experience(Model):
     revision_kind: Literal["update", "correct"] = "update"
 
 
+class Understanding(Model):
+    id: Text = Field(description="认识的稳定 ID")
+    title: Text
+    statement: Text
+    basis: Literal["explicit", "inferred"] = Field(description="明确表达或根据支撑经历归纳")
+    supports: list[Text] = Field(min_length=1, description="当前分区内支撑经历的 record_id 或经历 ID")
+    valid_from: AwareDatetime | None = None
+    valid_to: AwareDatetime | None = None
+    replaces: Text | None = Field(default=None, description="更新时填写同一认识的最新 record_id")
+    revision_kind: Literal["update", "correct"] = "update"
+
+    @model_validator(mode="after")
+    def valid_interval(self):
+        if self.valid_from is not None and self.valid_to is not None and self.valid_to <= self.valid_from:
+            raise ValueError("认识的 valid_to 必须晚于 valid_from")
+        return self
+
+
 class WriteContext(Model):
     origin: Text | None = None
     workspace: Text | None = None

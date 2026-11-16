@@ -59,7 +59,7 @@ def ledger_snapshot(store: SQLiteExperiences, known_at=None, at=None):
             'narrative': payload.get('narrative', payload.get('statement', '')),
             'when': payload.get('when', {'precision': 'unknown', 'description': ''}),
             'basis': payload.get('basis'),
-            'supports': payload.get('supports', []),
+            'supports': payload.get('support_record_ids') or payload.get('supports', []),
             'entities': payload.get('entities', []),
             'replaces': payload.get('replaces'),
             'revision_kind': payload.get('revision_kind', 'update'),

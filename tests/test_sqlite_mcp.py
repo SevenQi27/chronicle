@@ -61,6 +61,27 @@ def test_existing_database_indexes_both_versions(tmp_path):
     assert store.recall(RecallQuery(query='三楼'))['results'] == []
 
 
+def test_understanding_cannot_reference_another_namespace(tmp_path):
+    path = tmp_path / 'memory.sqlite3'
+    foreign = SQLiteExperiences(path, 'other')
+    external = foreign.write(ExperienceWrite.model_validate({
+        'source': {'id': 'original', 'content': '项目开会', 'occurred_at': '2026-11-16T00:00:00Z'},
+        'experiences': [{'id': 'meeting', 'title': '项目会议', 'narrative': '讨论会议安排'}],
+    }))
+    local = SQLiteExperiences(path, 'local')
+    for reference in [external['record_ids'][0], 'meeting']:
+        request = ExperienceWrite.model_validate({
+            'source': {'id': 'conclusion', 'content': '明确议程', 'occurred_at': '2026-11-16T00:00:00Z'},
+            'understandings': [{'id': 'insight', 'title': '会议议程', 'statement': '开会前先确认议程',
+                               'basis': 'inferred', 'supports': [reference]}],
+        })
+        with pytest.raises(ValueError, match='supports 必须引用当前分区中已有的经历'):
+            local.write(request)
+    with local.connection() as conn:
+        assert conn.execute("SELECT id FROM chronicle_source WHERE namespace='local'").fetchall() == []
+    assert local.recall(RecallQuery(query='会议议程'))['results'] == []
+
+
 @pytest.mark.parametrize('expiry', [
     '2026-11-16T09:00:00+08:00',
     '2026-11-16T01:00:00Z',

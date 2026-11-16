@@ -27,10 +27,12 @@ Use the same path and namespace after restarting to read the same memories. Exis
 
 | Tool | Use |
 | --- | --- |
-| `memory_write` | Save experiences with a stable logical ID, an original source, and optional entity names and aliases. |
-| `memory_search`, `memory_context` | Recall matching experiences by indexed terms. Optional filters cover origin, workspace, conversation, and source. |
-| `memory_details` | Read a version and its evidence by `record_id`. Use `source_mode=summary` to omit source text. |
+| `memory_write` | Save sourced experiences and understandings. An understanding's `supports` must refer to experiences in the same namespace by logical ID or version ID. |
+| `memory_search`, `memory_context` | Recall matching memories by indexed terms. Optional filters cover origin, workspace, conversation, and source. |
+| `memory_details` | Read a version and its evidence by `record_id`. Follow an understanding's `support_record_ids` to read the supporting experiences and their original sources. |
 
-To correct an experience, use the same logical ID, provide a new source ID, and set `replaces` to the current version's `record_id`. Recall supports `known_at` for the knowledge cutoff and `at` for the effective time. Keywords, aliases and explicit `alternatives` provide recall without a model service.
+To correct a memory, use the same logical ID, provide a new source ID, and set `replaces` to the current version's `record_id`. Recall supports `known_at` for the knowledge cutoff and `at` for the effective time. Chronicle resolves logical IDs in `supports` to specific versions at write time. Use `source_mode=summary` to omit source text.
+
+Keywords, aliases and explicit `alternatives` provide recall without a model service.
 
 Run the local acceptance checks with `uv run python -m pytest -q`. See [the testing guide](docs/testing.md) for the end-to-end example.

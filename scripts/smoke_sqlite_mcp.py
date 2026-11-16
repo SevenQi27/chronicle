@@ -100,6 +100,41 @@ async def smoke(launcher, database):
         assert [source['id'] for source in new['sources']] == ['message-2', 'message-1']
         print('PASS 新 MCP 进程复用 SQLite，当前五楼，历史仍可查到三楼和原始来源')
 
+        insight_source = {
+            'id': 'insight-message', 'content': '开会地点要以最新确认的消息为准。',
+            'occurred_at': datetime.now(timezone.utc).isoformat(),
+        }
+        insight = {
+            'id': 'meeting-guideline', 'title': '会前确认地点', 'statement': '会议地点以最新确认的消息为准。',
+            'basis': 'inferred', 'supports': ['missing-experience'],
+            'valid_to': '2099-01-01T09:00:00+08:00',
+        }
+        await call(session, 'memory_write', {
+            'source': insight_source, 'understandings': [insight],
+        }, error='invalid_arguments')
+        write_insight = {
+            'source': insight_source, 'understandings': [{**insight, 'supports': [first, 'aurora-review']}],
+        }
+        written = await call(session, 'memory_write', write_insight)
+        assert await call(session, 'memory_write', write_insight) == written
+        insight_record, = written['record_ids']
+        await call(session, 'memory_write', {
+            'source': {**insight_source, 'id': 'wrong-support-message'},
+            'understandings': [{**insight, 'id': 'wrong-support', 'supports': [insight_record]}],
+        }, error='invalid_arguments')
+
+        query = {'query': '会前确认地点', 'subject': 'meeting-guideline'}
+        entry, = (await call(session, 'memory_search', query))['results']
+        assert (entry['record_id'], entry['record_kind'], entry['basis']) == (insight_record, 'understanding', 'inferred')
+        detail, = await call(session, 'memory_details', {'event_ids': [insight_record]})
+        assert detail['support_record_ids'] == [first, second]
+        assert detail['source']['content'] == insight_source['content']
+        supporting = await call(session, 'memory_details', {'event_ids': detail['support_record_ids']})
+        assert [r['record_kind'] for r in supporting] == ['experience', 'experience']
+        assert [r['source']['content'] for r in supporting] == [original['source']['content'], correction['source']['content']]
+        assert not (await call(session, 'memory_search', {**query, 'at': '2099-01-01T01:00:00Z'}))['results']
+        print('PASS 认识通过全文检索，能沿两个支撑版本查到原文，拒绝无效支撑并按 UTC 到期')
+
         effective_at = '2099-01-01T00:00:00+00:00'
         future = write_request(
             'message-4', '未来安排改到七楼。', '极光评审在七楼会议室。',
