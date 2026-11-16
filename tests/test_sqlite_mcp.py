@@ -11,8 +11,9 @@ from urllib.request import Request, urlopen
 import pytest
 
 from chronicle_memory import cli
+from chronicle_memory.models import DetailQuery, VisibilityRequest
 from chronicle_memory.sqlite_mcp import SCHEMA, ExperienceWrite, RecallQuery, SQLiteExperiences
-from chronicle_memory.ui import ledger_snapshot, make_server
+from chronicle_memory.ui import graph_snapshot, ledger_snapshot, make_server
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -80,6 +81,43 @@ def test_understanding_cannot_reference_another_namespace(tmp_path):
     with local.connection() as conn:
         assert conn.execute("SELECT id FROM chronicle_source WHERE namespace='local'").fetchall() == []
     assert local.recall(RecallQuery(query='会议议程'))['results'] == []
+
+
+def test_withdrawal_hides_new_versions_and_preserves_shared_evidence(tmp_path):
+    store = SQLiteExperiences(tmp_path / 'memory.sqlite3', 'test')
+
+    def write(source_id, logical_id, title, **fields):
+        result = store.write(ExperienceWrite.model_validate({
+            'source': {'id': source_id, 'content': title, 'occurred_at': '2026-11-16T00:00:00Z'},
+            'experiences': [{'id': logical_id, 'title': title, 'narrative': title, **fields}],
+        }))
+        return result['record_ids'][0]
+
+    first = write('shared-source', 'plan', '会议安排')
+    other = write('other-source', 'notes', '会议纪要', source_ids=['shared-source'])
+    store.visibility(VisibilityRequest(action='withdraw', memory_ids=[first]))
+    revision = write('revision-source', 'plan', '会议安排已更新', replaces=first)
+
+    assert store.details(DetailQuery(event_ids=[first, revision])) == []
+    assert all(item['withdrawn'] for item in store.details(DetailQuery(
+        event_ids=[first, revision], include_withdrawn=True,
+    )))
+    assert [item['record_id'] for item in store.recall(RecallQuery(query='会议'))['results']] == [other]
+    ledger = ledger_snapshot(store)
+    assert [item['record_id'] for item in ledger['memories']] == [other]
+    assert 'shared-source' in {source['id'] for source in ledger['memories'][0]['sources']}
+    graph = graph_snapshot(store)
+    graph_ids = {node['id'] for node in graph['nodes']}
+    assert graph_ids.isdisjoint({first, revision})
+    assert {other, 'source:shared-source'} <= graph_ids
+    assert 'source:revision-source' not in graph_ids
+
+    store.visibility(VisibilityRequest(action='restore', memory_ids=['plan']))
+    recovered = store.recall(RecallQuery(query='会议安排', subject='plan'))['results']
+    assert [item['record_id'] for item in recovered] == [revision]
+    restored = store.details(DetailQuery(event_ids=[first, revision]))
+    assert [item['source']['content'] for item in restored] == ['会议安排', '会议安排已更新']
+    assert not any(item['withdrawn'] for item in restored)
 
 
 @pytest.mark.parametrize('expiry', [

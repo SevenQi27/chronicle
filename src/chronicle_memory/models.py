@@ -120,3 +120,9 @@ class DetailQuery(Model):
     known_at: AwareDatetime | None = None
     source_mode: Literal['full','summary'] = Field(default='full',description='full 返回全部来源正文；summary 保留全部来源标识/角色/时间/长度，省略来源正文，记忆正文仍完整')
     include_withdrawn: bool = False
+
+
+class VisibilityRequest(Model):
+    action: Literal['withdraw', 'restore']
+    memory_ids: list[Text] = Field(min_length=1, description='当前分区的记忆 ID 或任意版本 record_id')
+    reason: str = ''

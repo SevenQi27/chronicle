@@ -18,7 +18,7 @@ from pydantic import Field, model_validator
 
 from . import __version__
 from .errors import ConflictError, error_result
-from .models import DetailQuery, Experience, Model, Query, Source, Understanding, WriteContext, stamp, utcnow
+from .models import DetailQuery, Experience, Model, Query, Source, Understanding, VisibilityRequest, WriteContext, stamp, utcnow
 
 
 def tokens(text):
@@ -74,6 +74,21 @@ CREATE TABLE IF NOT EXISTS chronicle_experience (
 );
 CREATE INDEX IF NOT EXISTS chronicle_experience_head
     ON chronicle_experience(namespace, logical_id, seq DESC);
+CREATE TABLE IF NOT EXISTS chronicle_withdrawal (
+    namespace TEXT NOT NULL,
+    logical_id TEXT NOT NULL,
+    withdrawn_at TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    PRIMARY KEY (namespace, logical_id)
+);
+"""
+
+# Queries using r as the record alias share the same visibility rule.
+WITHDRAWN_MEMORY = """
+EXISTS (
+    SELECT 1 FROM chronicle_withdrawal AS w
+    WHERE w.namespace=r.namespace AND w.logical_id=r.logical_id
+)
 """
 
 
@@ -215,20 +230,49 @@ class SQLiteExperiences:
     def support_record_ids(self, conn, references):
         record_ids = []
         for reference in dict.fromkeys(references):
-            support = conn.execute(
-                'SELECT record_id, record_kind FROM chronicle_experience WHERE namespace=? AND record_id=?',
-                (self.namespace, reference),
-            ).fetchone()
-            if support is None:
-                support = conn.execute(
-                    'SELECT record_id, record_kind FROM chronicle_experience WHERE namespace=? AND logical_id=? '
-                    'ORDER BY seq DESC LIMIT 1',
-                    (self.namespace, reference),
-                ).fetchone()
+            support = self.find_record(conn, reference)
             if support is None or support['record_kind'] != 'experience':
                 raise ValueError(f"supports 必须引用当前分区中已有的经历：{reference}")
             record_ids.append(support['record_id'])
         return list(dict.fromkeys(record_ids))
+
+    def find_record(self, conn, reference):
+        record = conn.execute(
+            'SELECT record_id, logical_id, record_kind FROM chronicle_experience WHERE namespace=? AND record_id=?',
+            (self.namespace, reference),
+        ).fetchone()
+        if record is not None:
+            return record
+        return conn.execute(
+            'SELECT record_id, logical_id, record_kind FROM chronicle_experience '
+            'WHERE namespace=? AND logical_id=? ORDER BY seq DESC LIMIT 1',
+            (self.namespace, reference),
+        ).fetchone()
+
+    def visibility(self, request):
+        with self.connection() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            keys = {}
+            for reference in request.memory_ids:
+                record = self.find_record(conn, reference)
+                if record is None:
+                    raise ValueError(f'当前分区找不到记忆：{reference}')
+                keys[record['logical_id']] = None
+
+            withdrawn = request.action == 'withdraw'
+            if withdrawn:
+                now = stamp(utcnow())
+                conn.executemany(
+                    'INSERT INTO chronicle_withdrawal(namespace, logical_id, withdrawn_at, reason) VALUES (?, ?, ?, ?) '
+                    'ON CONFLICT(namespace, logical_id) DO NOTHING',
+                    [(self.namespace, key, now, request.reason) for key in keys],
+                )
+            else:
+                conn.executemany(
+                    'DELETE FROM chronicle_withdrawal WHERE namespace=? AND logical_id=?',
+                    [(self.namespace, key) for key in keys],
+                )
+        return {'action': request.action, 'memory_ids': list(keys), 'withdrawn': withdrawn}
 
     def sources(self, conn, identifiers):
         rows = conn.execute(
@@ -241,11 +285,12 @@ class SQLiteExperiences:
         return [by_id[identifier] for identifier in identifiers]
 
     def candidates(self, conn, match, at, known_at, filters):
-        sql = """
+        sql = f"""
             SELECT r.seq, r.record_id, r.source_id, r.recorded_at, r.body, r.terms, r.record_kind
             FROM chronicle_experience_fts CROSS JOIN chronicle_experience AS r
             WHERE chronicle_experience_fts MATCH ? AND r.seq=chronicle_experience_fts.rowid
               AND r.namespace=? AND r.recorded_at<=?
+              AND NOT {WITHDRAWN_MEMORY}
               AND (r.effective_at IS NULL OR r.effective_at<=?)
               AND (r.valid_to IS NULL OR r.valid_to>?)
               AND r.seq=(
@@ -319,10 +364,11 @@ class SQLiteExperiences:
             conn.execute('BEGIN')
             for record_id in dict.fromkeys(request.event_ids):
                 row = conn.execute(
-                    'SELECT * FROM chronicle_experience WHERE namespace=? AND record_id=? AND recorded_at<=?',
+                    f'SELECT r.*, {WITHDRAWN_MEMORY} AS withdrawn FROM chronicle_experience AS r '
+                    'WHERE r.namespace=? AND r.record_id=? AND r.recorded_at<=?',
                     (self.namespace, record_id, known_at),
                 ).fetchone()
-                if not row:
+                if not row or (row['withdrawn'] and not request.include_withdrawn):
                     continue
                 head = conn.execute(
                     'SELECT record_id FROM chronicle_experience WHERE namespace=? AND logical_id=? AND recorded_at<=? '
@@ -336,6 +382,7 @@ class SQLiteExperiences:
                 result.append({
                     **json.loads(row['body']), 'event_id': record_id, 'record_id': record_id,
                     'record_kind': row['record_kind'], 'source_id': row['source_id'], 'source': sources[0],
+                    'withdrawn': bool(row['withdrawn']),
                     'sources': sources, 'source_count': len(sources), 'source_mode': request.source_mode,
                     'recorded_at': row['recorded_at'], 'at': at, 'known_at': known_at,
                     'superseded': head['record_id'] != record_id or bool(row['effective_at'] and row['effective_at'] > at),
@@ -348,12 +395,13 @@ def build_server(store):
         'memory_write': (ExperienceWrite, store.write, '保存带来源的经历或认识。认识的 supports 必须引用已有经历。更正时沿用记忆 ID，replaces 填当前版本的 record_id。'),
         'memory_search': (RecallQuery, store.recall, '按关键词、实体名称和已保存的别名检索经历及认识。可传 alternatives。'),
         'memory_context': (RecallQuery, store.recall, '检索相关记忆的短摘要与 record_id，按需使用 memory_details。'),
-        'memory_details': (DetailQuery, store.details, '按版本 ID 读取记忆与来源。用认识的 support_record_ids 继续查看支撑经历及其原文。'),
+        'memory_details': (DetailQuery, store.details, '按版本 ID 读取记忆、支撑经历与来源。显式传 include_withdrawn=true 可查看已撤回的版本。'),
+        'memory_visibility': (VisibilityRequest, store.visibility, 'withdraw 撤回一条逻辑记忆的所有版本，restore 恢复可见性。保留原文和历史。'),
     }
     async def list_tools(context, params):
         return ListToolsResult(tools=[
             Tool(name=name, description=description, inputSchema=model.model_json_schema(),
-                 annotations=ToolAnnotations(readOnlyHint=name != 'memory_write', openWorldHint=False))
+                 annotations=ToolAnnotations(readOnlyHint=name not in ('memory_write', 'memory_visibility'), openWorldHint=False))
             for name, (model, _, description) in operations.items()
         ])
 
@@ -373,6 +421,7 @@ def build_server(store):
     instructions = (
         'SQLite 模式。使用 memory_write 保存带来源的经历或认识，认识必须引用支撑经历。'
         '使用 memory_search 或 memory_context 检索摘要，memory_details 查阅来源和支撑经历版本。'
+        '使用 memory_visibility 撤回或恢复记忆。'
         '更正时先查询当前记录，沿用记忆 ID、为新原话提供新来源 ID，'
         '并用 replaces 引用当前记录的 record_id。'
     )

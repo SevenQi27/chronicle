@@ -30,9 +30,12 @@ chronicle mcp --sqlite /absolute/path/memory.sqlite3 --namespace personal
 | `memory_write` | 保存带原始证据的经历与认识。认识需在 `supports` 中引用当前分区的经历 ID 或版本 ID。 |
 | `memory_search`、`memory_context` | 按关键词检索经历与认识，也可按来源平台、工作区、会话或证据来源筛选。 |
 | `memory_details` | 按 `record_id` 查看版本与来源。读取认识后，可继续按 `support_record_ids` 查看支撑经历及其原文。 |
+| `memory_visibility` | 对 `memory_ids` 执行 `withdraw`（撤回）或 `restore`（恢复）。可传记忆 ID 或任意版本 ID。 |
 
 更正时沿用记忆 ID，给新原话分配新来源 ID，并用 `replaces` 引用当前版本的 `record_id`。查询可用 `known_at` 指定当时已获知的信息，用 `at` 指定生效时间。认识引用经历 ID 时，保存时会解析为当时的具体版本。使用 `source_mode=summary` 可省略来源正文。
 
 关键词、别名和显式传入的 `alternatives` 都能参与召回，无需配置模型服务。
+
+撤回会在默认搜索、详情和可视化页面中隐藏该记忆的全部版本，按历史时间查询时也遵守当前撤回状态。原文和版本继续保留。显式传入 `memory_details.include_withdrawn=true` 可按版本 ID 查看；恢复后可照常检索。
 
 运行 `uv run python -m pytest -q` 验证。端到端示例见[测试说明](docs/testing.md)。

@@ -52,7 +52,7 @@ async def smoke(launcher, database):
     old_only = {'query': '三楼'}
     async with client(launcher, database) as session:
         assert {tool.name for tool in (await session.list_tools()).tools} == {
-            'memory_write', 'memory_search', 'memory_context', 'memory_details',
+            'memory_write', 'memory_search', 'memory_context', 'memory_details', 'memory_visibility',
         }
         saved = await call(session, 'memory_write', original)
         first = saved['record_ids'][0]
@@ -89,16 +89,38 @@ async def smoke(launcher, database):
         assert [row['record_id'] for row in historic['results']] == [first]
         print('PASS 更正后命中五楼，旧版本写入被拦截并返回最新版本 ID')
 
+        hidden = await call(session, 'memory_visibility', {
+            'action': 'withdraw', 'memory_ids': [first, 'aurora-review'],
+        })
+        assert hidden['withdrawn'] and hidden['memory_ids'] == ['aurora-review']
+        assert not (await call(session, 'memory_search', alias_question))['results']
+        assert not (await call(session, 'memory_context', lexical_question))['results']
+        assert not (await call(session, 'memory_search', {
+            **alias_question, 'known_at': saved['recorded_at'],
+        }))['results']
+        assert await call(session, 'memory_details', {'event_ids': [first, second]}) == []
+        withdrawn = await call(session, 'memory_details', {
+            'event_ids': [first, second], 'include_withdrawn': True,
+        })
+        assert [r['record_id'] for r in withdrawn] == [first, second]
+        assert all(r['withdrawn'] for r in withdrawn)
+        assert [r['source']['content'] for r in withdrawn] == [original['source']['content'], correction['source']['content']]
+        print('PASS 撤回后默认检索和详情均隐藏，显式查看仍保留两个版本及原文')
+
     async with client(launcher, database) as session:
+        assert not (await call(session, 'memory_search', alias_question))['results']
+        restored = await call(session, 'memory_visibility', {'action': 'restore', 'memory_ids': [second]})
+        assert not restored['withdrawn'] and restored['memory_ids'] == ['aurora-review']
         current = (await call(session, 'memory_search', alias_question))['results']
         assert [row['record_id'] for row in current] == [second] and '五楼' in current[0]['summary']
         historic = (await call(session, 'memory_search', {**alias_question, 'known_at': saved['recorded_at']}))['results']
         assert [row['record_id'] for row in historic] == [first] and '三楼' in historic[0]['summary']
         old, new = await call(session, 'memory_details', {'event_ids': [first, second]})
         assert old['superseded'] and not new['superseded'] and new['replaces'] == first
+        assert not old['withdrawn'] and not new['withdrawn']
         assert old['source']['content'] == original['source']['content']
         assert [source['id'] for source in new['sources']] == ['message-2', 'message-1']
-        print('PASS 新 MCP 进程复用 SQLite，当前五楼，历史仍可查到三楼和原始来源')
+        print('PASS 重启保留撤回状态，恢复后能查到当前五楼、历史三楼和两条原始来源')
 
         insight_source = {
             'id': 'insight-message', 'content': '开会地点要以最新确认的消息为准。',

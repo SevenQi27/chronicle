@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from .errors import error_result
 from .models import stamp, utcnow
-from .sqlite_mcp import SQLiteExperiences
+from .sqlite_mcp import SQLiteExperiences, WITHDRAWN_MEMORY
 
 
 def ledger_snapshot(store: SQLiteExperiences, known_at=None, at=None):
@@ -21,7 +21,7 @@ def ledger_snapshot(store: SQLiteExperiences, known_at=None, at=None):
         all_rows = conn.execute(
             'SELECT seq, record_id, logical_id, source_id, recorded_at, effective_at, valid_to, body, '
             'origin, workspace, conversation_id, evidence_ids, record_kind '
-            'FROM chronicle_experience WHERE namespace=? ORDER BY seq ASC',
+            f'FROM chronicle_experience AS r WHERE namespace=? AND NOT {WITHDRAWN_MEMORY} ORDER BY seq ASC',
             (store.namespace,),
         ).fetchall()
         source_rows = conn.execute(
@@ -180,7 +180,8 @@ def graph_snapshot(store: SQLiteExperiences):
         conn.execute('BEGIN')
         rows = conn.execute(
             'SELECT record_id, logical_id, record_kind, recorded_at, body, evidence_ids '
-            'FROM chronicle_experience WHERE namespace=? AND recorded_at<=? ORDER BY seq DESC',
+            f'FROM chronicle_experience AS r WHERE namespace=? AND recorded_at<=? '
+            f'AND NOT {WITHDRAWN_MEMORY} ORDER BY seq DESC',
             (store.namespace, now),
         ).fetchall()
         sources = {
