@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import errno
 import json
 import os
 from pathlib import Path
@@ -89,6 +90,12 @@ def main():
     except KeyboardInterrupt:
         raise SystemExit(130) from None
     except (ValueError, OSError, sqlite3.Error) as error:
-        failure = error_result(error)
+        if args.command == 'ui' and isinstance(error, OSError) and error.errno == errno.EADDRINUSE:
+            failure = {'ok': False, 'error': {
+                'code': 'port_in_use',
+                'message': f'端口 {args.port} 已被占用。可以用 --port 指定其他端口。',
+            }}
+        else:
+            failure = error_result(error)
         print(json.dumps(failure, ensure_ascii=False), file=sys.stderr)
         raise SystemExit(2 if failure['error']['code'] == 'invalid_arguments' else 4) from None

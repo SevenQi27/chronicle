@@ -1,6 +1,7 @@
 from datetime import datetime
 import json
 from pathlib import Path
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -68,6 +69,22 @@ def test_ui_explicit_connection_skips_config_lookup(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, 'argv', ['chronicle', 'ui', '--sqlite', str(path), '--namespace', 'other'])
     cli.main()
     assert started == [(path, 'other', 8765)]
+
+
+def test_ui_reports_busy_port_instead_of_storage_error(tmp_path, monkeypatch, capsys):
+    with socket.socket() as listener:
+        listener.bind(('127.0.0.1', 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        monkeypatch.setattr(sys, 'argv', [
+            'chronicle', 'ui', '--port', str(port), '--sqlite', str(tmp_path / 'memory.sqlite3'),
+            '--namespace', 'test',
+        ])
+        with pytest.raises(SystemExit):
+            cli.main()
+    error = json.loads(capsys.readouterr().err)['error']
+    assert error['code'] == 'port_in_use'
+    assert str(port) in error['message']
 
 
 def test_existing_database_indexes_both_versions(tmp_path):
