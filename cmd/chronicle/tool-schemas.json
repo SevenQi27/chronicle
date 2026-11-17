@@ -1,0 +1,636 @@
+{
+  "memory_write": {
+    "$defs": {
+      "Entity": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "分区内稳定标识，已有同一个人或主题时复用",
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "category": {
+            "default": "topic",
+            "description": "开放类别，如人、地点、主题、物品，不限领域",
+            "minLength": 1,
+            "title": "Category",
+            "type": "string"
+          },
+          "aliases": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Aliases",
+            "type": "array"
+          },
+          "operation": {
+            "default": "mention",
+            "description": "mention 复用规范名并追加别名；correct 明确更正规范名、类别和完整别名列表，不改写历史经历正文",
+            "enum": [
+              "mention",
+              "correct"
+            ],
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "Entity",
+        "type": "object"
+      },
+      "Experience": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "经历的稳定 ID，例如一次交流或一段经历的标识",
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "title": {
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "narrative": {
+            "description": "保留背景、过程和原话含义的完整经历叙述；不可编造感受和因果",
+            "minLength": 1,
+            "title": "Narrative",
+            "type": "string"
+          },
+          "when": {
+            "$ref": "#/$defs/ExperienceTime"
+          },
+          "entities": {
+            "items": {
+              "$ref": "#/$defs/Entity"
+            },
+            "maxItems": 30,
+            "title": "Entities",
+            "type": "array"
+          },
+          "source_ids": {
+            "description": "额外的真实来源 ID；当前 source 自动关联",
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "title": "Source Ids",
+            "type": "array"
+          },
+          "replaces": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "扩展或纠正同一经历时引用最新版本 record_id",
+            "title": "Replaces"
+          },
+          "revision_kind": {
+            "default": "update",
+            "enum": [
+              "update",
+              "correct"
+            ],
+            "title": "Revision Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "narrative"
+        ],
+        "title": "Experience",
+        "type": "object"
+      },
+      "ExperienceTime": {
+        "additionalProperties": false,
+        "properties": {
+          "start": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Start"
+          },
+          "end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "End"
+          },
+          "precision": {
+            "default": "unknown",
+            "enum": [
+              "exact",
+              "day",
+              "range",
+              "approximate",
+              "unknown"
+            ],
+            "title": "Precision",
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          }
+        },
+        "title": "ExperienceTime",
+        "type": "object"
+      },
+      "Source": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "宿主消息或工具结果的稳定 ID；重试使用相同 ID",
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "content": {
+            "minLength": 1,
+            "title": "Content",
+            "type": "string"
+          },
+          "role": {
+            "default": "user",
+            "enum": [
+              "user",
+              "tool",
+              "assistant"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "occurred_at": {
+            "description": "原消息时间，用于解释昨天、下周等相对时间",
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "conversation_id": {
+            "default": "default",
+            "minLength": 1,
+            "title": "Conversation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "content",
+          "occurred_at"
+        ],
+        "title": "Source",
+        "type": "object"
+      },
+      "Understanding": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "认识的稳定 ID",
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "title": {
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "statement": {
+            "minLength": 1,
+            "title": "Statement",
+            "type": "string"
+          },
+          "basis": {
+            "description": "明确表达或根据支撑经历归纳",
+            "enum": [
+              "explicit",
+              "inferred"
+            ],
+            "title": "Basis",
+            "type": "string"
+          },
+          "supports": {
+            "description": "当前分区内支撑经历的 record_id 或经历 ID",
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Supports",
+            "type": "array"
+          },
+          "valid_from": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Valid From"
+          },
+          "valid_to": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Valid To"
+          },
+          "replaces": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "更新时填写同一认识的最新 record_id",
+            "title": "Replaces"
+          },
+          "revision_kind": {
+            "default": "update",
+            "enum": [
+              "update",
+              "correct"
+            ],
+            "title": "Revision Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "statement",
+          "basis",
+          "supports"
+        ],
+        "title": "Understanding",
+        "type": "object"
+      },
+      "WriteContext": {
+        "additionalProperties": false,
+        "properties": {
+          "origin": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Origin"
+          },
+          "workspace": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Workspace"
+          }
+        },
+        "title": "WriteContext",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "source": {
+        "$ref": "#/$defs/Source"
+      },
+      "experiences": {
+        "items": {
+          "$ref": "#/$defs/Experience"
+        },
+        "title": "Experiences",
+        "type": "array"
+      },
+      "context": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WriteContext"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "understandings": {
+        "items": {
+          "$ref": "#/$defs/Understanding"
+        },
+        "title": "Understandings",
+        "type": "array"
+      }
+    },
+    "required": [
+      "source"
+    ],
+    "title": "ExperienceWrite",
+    "type": "object"
+  },
+  "memory_search": {
+    "$defs": {
+      "MemoryFilters": {
+        "additionalProperties": false,
+        "properties": {
+          "origin": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Origin"
+          },
+          "workspace": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Workspace"
+          },
+          "conversation_id": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Conversation Id"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Source Id"
+          }
+        },
+        "title": "MemoryFilters",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "query": {
+        "minLength": 1,
+        "title": "Query",
+        "type": "string"
+      },
+      "alternatives": {
+        "description": "调用方提供的不同表达；原始查询始终保留，不调用额外模型",
+        "items": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "maxItems": 3,
+        "title": "Alternatives",
+        "type": "array"
+      },
+      "filters": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/MemoryFilters"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "subject": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Subject"
+      },
+      "at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "At"
+      },
+      "known_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Known At"
+      },
+      "limit": {
+        "default": 8,
+        "maximum": 50,
+        "minimum": 1,
+        "title": "Limit",
+        "type": "integer"
+      },
+      "include_inactive": {
+        "default": false,
+        "title": "Include Inactive",
+        "type": "boolean"
+      },
+      "interpret_time": {
+        "const": false,
+        "default": false,
+        "title": "Interpret Time",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "title": "RecallQuery",
+    "type": "object"
+  },
+  "memory_details": {
+    "additionalProperties": false,
+    "properties": {
+      "event_ids": {
+        "items": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "maxItems": 50,
+        "minItems": 1,
+        "title": "Event Ids",
+        "type": "array"
+      },
+      "at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "At"
+      },
+      "known_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Known At"
+      },
+      "source_mode": {
+        "default": "full",
+        "description": "full 返回全部来源正文；summary 保留全部来源标识/角色/时间/长度，省略来源正文，记忆正文仍完整",
+        "enum": [
+          "full",
+          "summary"
+        ],
+        "title": "Source Mode",
+        "type": "string"
+      },
+      "include_withdrawn": {
+        "default": false,
+        "title": "Include Withdrawn",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "event_ids"
+    ],
+    "title": "DetailQuery",
+    "type": "object"
+  },
+  "memory_visibility": {
+    "additionalProperties": false,
+    "properties": {
+      "action": {
+        "enum": [
+          "withdraw",
+          "restore"
+        ],
+        "title": "Action",
+        "type": "string"
+      },
+      "memory_ids": {
+        "description": "当前分区的记忆 ID 或任意版本 record_id",
+        "items": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "minItems": 1,
+        "title": "Memory Ids",
+        "type": "array"
+      },
+      "reason": {
+        "default": "",
+        "title": "Reason",
+        "type": "string"
+      }
+    },
+    "required": [
+      "action",
+      "memory_ids"
+    ],
+    "title": "VisibilityRequest",
+    "type": "object"
+  }
+}

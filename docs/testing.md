@@ -1,14 +1,14 @@
 # SQLite 测试
 
 ```sh
-uv sync --locked
-uv run python -m pytest -q
+go test ./...
+go build ./...
 ```
 
-测试使用临时文件。MCP 端到端测试通过真实 stdio 握手、写入、关键词改写与别名召回、更正、历史查询和重启后读回。另有已有 SQLite 文件补建索引与默认启动路径的覆盖。
+测试使用临时 SQLite 文件。MCP 端到端测试通过真实 stdio 握手验证写入、索引召回、更正、历史查询和重启后读回。另有旧库索引及到期时间迁移、Codex hook、采集断线重连与去重，以及图谱 HTTP 入口的覆盖。
 
-也可单独运行端到端脚本：
+单独运行 MCP 和采集断线重连测试：
 
 ```sh
-uv run python scripts/smoke_sqlite_mcp.py
+go test ./cmd/chronicle -run 'TestMCP(StdioLifecycle|DrainsCaptureAfterReconnect)$'
 ```

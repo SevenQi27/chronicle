@@ -1,10 +1,6 @@
-.venv/
 .env
 .env.*
 data/
-__pycache__/
-.pytest_cache/
-*.egg-info/
 dist/
 # Machine-specific MCP configuration.
 .mcp.json
