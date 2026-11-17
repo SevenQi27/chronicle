@@ -1,64 +1,83 @@
 # Chronicle Memory
 
-Chronicle is a local MCP server for remembering experiences and their original sources. It stores data in SQLite and keeps previous versions when an experience is corrected.
+**Time-based memory for agents that preserves experiences, evidence, and change over time.**
 
-[简体中文](README.zh-CN.md)
+English · [简体中文](README.zh-CN.md)
+
+**What happened? What did we know then? What was corrected later?** When you add to or correct an experience or understanding, Chronicle saves a new version and retains the earlier version with its sources. An agent can look back to an earlier point in time or follow an understanding to its supporting experiences and original messages.
+
+## One event, two answers from different points in time
+
+Suppose a message recorded on November 3 says the November 20 review is on the third floor. On November 12, a correction confirms the review had been booked on the fifth floor all along. Both messages refer to the same review.
+
+| Question | Time in question | Knowledge cutoff | Retrieved version |
+| --- | --- | --- | --- |
+| On November 8, where did we think the review would be? | `at` is November 20 | `known_at` is November 8 | Third floor, with the original message |
+| Using the later correction, where was it booked? | `at` is November 20 | `known_at` is after November 12 | Fifth floor, with the correction |
+
+The event date is the same in both queries. The available information differs. Earlier versions remain traceable, and searches and detail reads can share the same `known_at` cutoff.
+
+## Three kinds of time
+
+| Time | Stored as | Used for |
+| --- | --- | --- |
+| **Occurrence time** | An experience's `when.start`, `when.end`, precision, and description | Record when something happened. Approximate dates and descriptions can preserve uncertainty. |
+| **Knowledge time** | Chronicle assigns `recorded_at` on write | `known_at` limits recall to versions recorded by a given time. |
+| **Effective time** | An understanding can set `valid_from` and `valid_to` | `at` sets the time being asked about. Recall uses it to check whether an understanding has taken effect or expired. |
+
+Original messages and tool results keep their own `source.occurred_at` timestamps. When a message was sent, when the event it describes occurred, and when Chronicle recorded it can differ.
+
+## Evidence, revisions, and visibility
+
+- **Experiences and sources.** Store experiences with their narratives, entities, and original sources. An understanding uses `supports` to point to specific experience versions in the same namespace. Its `basis` distinguishes an explicit user statement from an inference.
+- **Updates and corrections.** Keep the logical memory ID, supply a new source ID, and point `replaces` at the current `record_id`. Keyword, entity alias, and caller-provided alternative queries work within the selected time view.
+- **Visibility.** Withdrawing a memory hides all its versions from default recall, including historical queries. Chronicle retains the sources and versions. Restoring the memory makes it available to queries again.
 
 ## Quick start
 
-Build with Go 1.24 or later. SQLite and its FTS5 index are included in the executable. From this checkout:
+Build with Go 1.24 or later. SQLite and its FTS5 index are included in the executable.
 
 ```sh
 go install ./cmd/chronicle
 ```
 
-Configure your MCP host to use the absolute path to the installed `chronicle` executable with `mcp` as its argument. Chronicle starts over stdio and initializes its schema and search index on the first launch. The default database is `~/.local/share/chronicle/memory.sqlite3`.
-
-For a custom path or namespace:
+In your agent's MCP configuration, set the command to the absolute path of the installed `chronicle` executable and pass `mcp` as the argument. Chronicle initializes its database and indexes on first use. The default database is `~/.local/share/chronicle/memory.sqlite3`. The following arguments select a specific database and namespace.
 
 ```sh
 chronicle mcp --sqlite /absolute/path/memory.sqlite3 --namespace personal
 ```
 
-Use the same path and namespace after restarting to read the same memories. When switching an existing installation to this executable, preserve its `--sqlite`, `--namespace`, and any `--capture-queue` arguments. Existing Chronicle SQLite databases are indexed automatically on startup.
+To connect to an existing store, retain its `--sqlite`, `--namespace`, and any `--capture-queue` arguments.
 
-`chronicle ui` uses the database and namespace from the configured Chronicle MCP connection. Explicit `--sqlite` and `--namespace` options take precedence. Open <http://127.0.0.1:8765/> for the 3D graph.
-
-## MCP tools
+### MCP tools
 
 | Tool | Use |
 | --- | --- |
-| `memory_write` | Save sourced experiences and understandings. An understanding's `supports` must refer to experiences in the same namespace by logical ID or version ID. |
-| `memory_search`, `memory_context` | Recall matching memories by indexed terms. Optional filters cover origin, workspace, conversation, and source. |
-| `memory_details` | Read a version and its evidence by `record_id`. Follow an understanding's `support_record_ids` to read the supporting experiences and their original sources. |
-| `memory_visibility` | Use `withdraw` or `restore` with `memory_ids` containing logical memory IDs or version IDs. |
+| `memory_write` | Store a sourced experience or understanding, add information, or correct an earlier version. |
+| `memory_search`, `memory_context` | Recall matching memories. Set `at` and `known_at` or filter by origin, workspace, conversation, or source. |
+| `memory_details` | Read a version and its evidence by ID. Follow `support_record_ids` to the supporting experience versions. Use `source_mode=summary` to omit source text. |
+| `memory_visibility` | Withdraw or restore by memory ID or version ID. Use `memory_details.include_withdrawn=true` to inspect withdrawn versions explicitly. |
 
-To correct a memory, use the same logical ID, provide a new source ID, and set `replaces` to the current version's `record_id`. Recall supports `known_at` for the knowledge cutoff and `at` for the effective time. Chronicle resolves logical IDs in `supports` to specific versions at write time. Use `source_mode=summary` to omit source text.
+## Explore time and evidence in the 3D graph
 
-Keywords, aliases and explicit `alternatives` provide recall without a model service.
+```sh
+chronicle ui
+```
 
-Withdrawal hides every version of the selected memory from default search, details, and visual views. Historical queries also apply the current withdrawal state. Sources and versions remain available by version ID with `memory_details.include_withdrawn=true`. Restoring a memory makes it searchable again.
+Open the [local graph](http://127.0.0.1:8765/). The viewer uses the local Chronicle MCP configuration when available. You can also specify `--sqlite` and `--namespace` explicitly. The timeline slider filters loaded revisions by when Chronicle learned them. Follow the support and evidence links to trace an understanding back to the conversation.
 
-## Automatic conversation capture
+## Optional conversation capture and refinement
 
-The MCP server drains the queue for its database and namespace while connected. Any host can submit events with `chronicle capture submit --input event.json`, using the same `--sqlite` and `--namespace` options as the MCP server. Events contain `origin`, `turn_id`, `source`, and optional `workspace` and `private` fields. The source contains the message ID, conversation ID, role, text, and timestamp with a time zone.
-
-### Codex adapter
-
-Install the optional Codex adapter from the repository.
+A host can submit conversation messages to a local queue. MCP archives the queue while connected and resumes processing after reconnecting. The optional Codex adapter uses `UserPromptSubmit` and `Stop` to capture prompts and final replies. Run the command below, then review the hooks in Codex.
 
 ```sh
 chronicle capture setup-codex
 ```
 
-The installer uses the configured Chronicle MCP storage in Codex and preserves existing hooks. Review the `UserPromptSubmit` and `Stop` hooks in Codex. New messages queue locally while MCP is disconnected and are archived when it reconnects.
+Other hosts can use `chronicle capture submit --input event.json`. The event includes `origin`, `turn_id`, and `source`, with optional `workspace` and `private` fields. Use `chronicle capture status` to check progress. To archive while MCP is disconnected, run `chronicle capture worker` or pass `--once` to process one batch. If you specify a custom queue, use the same file for `--capture-queue` on the MCP server and `--queue` on the capture commands.
 
-`chronicle capture status` reports queue and retry status. `saved` means the worker committed a version to the memory database. Use `memory_search` to find a turn and `memory_details` to read its original messages and their roles. The queue excludes private turns and redacts marked spans and recognized credential formats before storing messages. Capture runs without a model service.
-
-For continuous capture without an MCP connection, run `chronicle capture worker`, or add `--once` to process one batch. For an existing custom queue, use `--capture-queue PATH` on the MCP server and `--queue PATH` on the capture commands.
-
-Pass both `--refine-base-url` and `--refine-model` to `chronicle mcp` to enable refinement for new turns. Supply `CHRONICLE_REFINE_API_KEY` in the environment if the endpoint requires authentication. After a complete turn is archived, MCP sends its messages and relevant understandings to the configured model. Each result points to the archived evidence through `support_record_ids`. Retries and restarts use the same refinement job for an archived version.
+Sourced writes, retrieval, and capture run without a model service. To refine complete conversations as they are archived, configure `chronicle mcp` with `--refine-base-url` and `--refine-model`. Use `CHRONICLE_REFINE_API_KEY` if the endpoint requires authentication. MCP sends the turn's messages and relevant understandings to the configured model. Refined understandings link to their evidence, and retries use the same job for an archived version.
 
 ## Tests
 
-Run the local acceptance checks with `go test ./...`. See [the testing guide](docs/testing.md) for details.
+Run `go test ./...`. See the [testing guide](docs/testing.md) for details.
