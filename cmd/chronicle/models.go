@@ -119,6 +119,7 @@ type memoryFilters struct {
 }
 
 type recallQuery struct {
+	recordKind      string
 	Query           string         `json:"query"`
 	Alternatives    []string       `json:"alternatives"`
 	Filters         *memoryFilters `json:"filters"`

@@ -3,12 +3,19 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/SevenQi27/chronicle/internal/refine"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func testQueue(t *testing.T, path string) *captureQueue {
@@ -87,6 +94,92 @@ func TestMCPDrainsCaptureAfterReconnect(t *testing.T) {
 			equal(t, count, 1)
 		})
 	}
+}
+
+func TestMCPRefinesCompleteTurnAndReplaysWithoutDuplicate(t *testing.T) {
+	const original = "确定了，星桥项目的月度报表统一使用 CSV。"
+	var calls atomic.Int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		var request struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || len(request.Messages) != 2 {
+			t.Errorf("unexpected model request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var input refine.Input
+		if err := json.Unmarshal([]byte(request.Messages[1].Content), &input); err != nil || len(input.Evidence) != 2 || input.Evidence[0].Content != original {
+			t.Errorf("unexpected turn evidence: %#v (%v)", input.Evidence, err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		candidate := refine.Candidate{Action: "create", Basis: "explicit", Title: "星桥报表格式",
+			Statement: "星桥项目的月度报表统一使用 CSV。", SourceIDs: []string{input.Evidence[0].SourceID}}
+		_ = json.NewEncoder(w).Encode(object{"choices": []object{{"finish_reason": "stop",
+			"message": object{"content": jsonString(object{"candidates": []refine.Candidate{candidate}})}}}})
+	}))
+	defer provider.Close()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "memory.sqlite3")
+	queue := testQueue(t, filepath.Join(dir, "events.sqlite3"))
+	options := []string{"--refine-base-url", provider.URL + "/v1", "--refine-model", "test"}
+	start := func() *mcp.ClientSession { return connectMCP(t, path, "refine-test", queue.path, options...) }
+	searchRefined := func(session *mcp.ClientSession) []string {
+		result := call(t, session, "memory_search", object{"query": "星桥报表 CSV"}, "").(map[string]any)
+		var ids []string
+		for _, hit := range result["results"].([]any) {
+			item := hit.(map[string]any)
+			if item["record_kind"] == "understanding" {
+				ids = append(ids, item["record_id"].(string))
+			}
+		}
+		return ids
+	}
+	s := start()
+	t.Cleanup(func() { _ = s.Close() })
+	_, err := queue.submit(t.Context(), sampleEvent("user", original), false)
+	check(t, err)
+	waitForQueue(t, queue)
+	store := testStore(t, path, "refine-test")
+	var jobs int
+	check(t, store.db.QueryRow("SELECT count(*) FROM chronicle_refinement").Scan(&jobs))
+	equal(t, jobs, 0)
+	equal(t, calls.Load(), int32(0))
+	_, err = queue.submit(t.Context(), sampleEvent("assistant", "收到。"), false)
+	check(t, err)
+	var ids []string
+	for deadline := time.Now().Add(12 * time.Second); len(ids) == 0 && time.Now().Before(deadline); {
+		time.Sleep(100 * time.Millisecond)
+		ids = searchRefined(s)
+	}
+	equal(t, len(ids), 1)
+	equal(t, calls.Load(), int32(2))
+	detail := call(t, s, "memory_details", object{"event_ids": ids}, "").([]any)[0].(map[string]any)
+	versionIDs := detail["support_record_ids"].([]any)
+	equal(t, len(versionIDs), 1)
+	experience := call(t, s, "memory_details", object{"event_ids": versionIDs}, "").([]any)[0].(map[string]any)
+	equal(t, experience["sources"].([]any)[1].(map[string]any)["content"], original)
+	check(t, s.Close())
+	// Replay messages as if the archive committed just before queue acknowledgement.
+	_, err = queue.db.Exec("UPDATE events SET status='queued'")
+	check(t, err)
+	s = start()
+	waitForQueue(t, queue)
+	equal(t, searchRefined(s), ids)
+	check(t, store.db.QueryRow("SELECT count(*) FROM chronicle_refinement").Scan(&jobs))
+	equal(t, jobs, 1)
+	var attempts, done int
+	check(t, store.db.QueryRow("SELECT attempts, done FROM chronicle_refinement").Scan(&attempts, &done))
+	equal(t, attempts, 1)
+	equal(t, done, 1)
+	equal(t, calls.Load(), int32(2))
 }
 
 func TestCaptureRetryAndReplay(t *testing.T) {

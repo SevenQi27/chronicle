@@ -333,7 +333,10 @@ func optionalString(s sql.NullString) any {
 var workerAlreadyRunning = invalid("A capture worker is already running for this queue")
 
 func (q *captureQueue) withWorkerLock(ctx context.Context, body func() error) error {
-	path := q.path + ".worker-lock.sqlite3"
+	return withSQLiteWorkerLock(ctx, q.path+".worker-lock.sqlite3", body)
+}
+
+func withSQLiteWorkerLock(ctx context.Context, path string, body func() error) error {
 	if err := prepareFile(path); err != nil {
 		return err
 	}
@@ -380,6 +383,7 @@ func (s *memoryStore) archiveTurn(ctx context.Context, turn string, events []cap
 	references := make([]object, 0, len(events))
 	ids := make([]string, 0, len(events))
 	workspace, prompt := "", ""
+	var hasUser, hasAnswer bool
 	roles := map[string]string{"user": "用户", "assistant": "助手（未经用户确认）", "tool": "工具结果"}
 	messages := make([]string, 0, len(events))
 	for _, event := range events {
@@ -387,6 +391,8 @@ func (s *memoryStore) archiveTurn(ctx context.Context, turn string, events []cap
 			workspace = event.Workspace
 		}
 		item := event.Source
+		hasUser = hasUser || item.Role == "user"
+		hasAnswer = hasAnswer || item.Role == "assistant"
 		if prompt == "" && item.Role == "user" {
 			prompt = item.Content
 		}
@@ -464,6 +470,12 @@ SELECT record_id FROM chronicle_experience WHERE namespace=? AND logical_id=? AN
 			return err
 		}
 		recordID = result["record_ids"].([]string)[0]
+		if s.refineNewTurns && hasUser && hasAnswer {
+			_, err := conn.ExecContext(ctx,
+				"INSERT INTO chronicle_refinement(namespace, record_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
+				s.namespace, recordID)
+			return err
+		}
 		return nil
 	})
 	return recordID, err

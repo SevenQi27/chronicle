@@ -57,6 +57,8 @@ The installer uses the configured Chronicle MCP storage in Codex and preserves e
 
 For continuous capture without an MCP connection, run `chronicle capture worker`, or add `--once` to process one batch. For an existing custom queue, use `--capture-queue PATH` on the MCP server and `--queue PATH` on the capture commands.
 
+Pass both `--refine-base-url` and `--refine-model` to `chronicle mcp` to enable refinement for new turns. Supply `CHRONICLE_REFINE_API_KEY` in the environment if the endpoint requires authentication. After a complete turn is archived, MCP sends its messages and relevant understandings to the configured model. Each result points to the archived evidence through `support_record_ids`. Retries and restarts use the same refinement job for an archived version.
+
 ## Tests
 
 Run the local acceptance checks with `go test ./...`. See [the testing guide](docs/testing.md) for details.

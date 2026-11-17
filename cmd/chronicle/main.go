@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/SevenQi27/chronicle/internal/refine"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -93,6 +94,7 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 	var port int
 	var interval float64
 	var input, codexHome string
+	var refineURL, refineModel string
 	var once bool
 	if action != "hook-codex" {
 		flags.StringVar(&values.path, "sqlite", "", "SQLite 数据库路径")
@@ -101,6 +103,8 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 	switch command {
 	case "mcp":
 		flags.StringVar(&values.queue, "capture-queue", "", "采集队列文件")
+		flags.StringVar(&refineURL, "refine-base-url", "", "自动提炼模型的 Chat Completions 基础地址")
+		flags.StringVar(&refineModel, "refine-model", "", "自动提炼模型名称")
 	case "ui":
 		flags.IntVar(&port, "port", 8765, "图谱监听端口")
 	case "capture":
@@ -145,7 +149,17 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 	case "ui":
 		return serveUI(ctx, resolved.path, resolved.namespace, port, out)
 	case "mcp":
-		return serveMCP(ctx, resolved.path, resolved.namespace, resolved.queue, &mcp.StdioTransport{})
+		var model refine.Model
+		if refineURL != "" || refineModel != "" {
+			client, err := refine.NewChatCompletions(refine.ChatConfig{
+				BaseURL: refineURL, Model: refineModel, APIKey: os.Getenv("CHRONICLE_REFINE_API_KEY"),
+			})
+			if err != nil {
+				return invalid(err.Error())
+			}
+			model = client
+		}
+		return serveMCP(ctx, resolved.path, resolved.namespace, resolved.queue, &mcp.StdioTransport{}, model)
 	default:
 		if resolved.queue == "" {
 			resolved.queue = defaultQueue(resolved.path, resolved.namespace)

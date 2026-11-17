@@ -72,12 +72,13 @@ func TestChronicleProcess(t *testing.T) {
 	os.Exit(2)
 }
 
-func connectMCP(t *testing.T, path, namespace, queue string) *mcp.ClientSession {
+func connectMCP(t *testing.T, path, namespace, queue string, opts ...string) *mcp.ClientSession {
 	t.Helper()
 	args := []string{"-test.run=^TestChronicleProcess$", "--", "mcp", "--sqlite", path, "--namespace", namespace}
 	if queue != "" {
 		args = append(args, "--capture-queue", queue)
 	}
+	args = append(args, opts...)
 	command := exec.Command(os.Args[0], args...)
 	command.Env = append(os.Environ(), "CHRONICLE_TEST_PROCESS=1")
 	client := mcp.NewClient(&mcp.Implementation{Name: "chronicle-test", Version: "1"}, nil)

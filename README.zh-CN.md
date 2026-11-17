@@ -57,6 +57,8 @@ chronicle capture setup-codex
 
 需要在 MCP 未连接时持续归档，可运行 `chronicle capture worker`，加 `--once` 可只处理一批。若原来使用了自定义队列，MCP 用 `--capture-queue PATH`，采集命令用 `--queue PATH` 指向同一文件。
 
+在 `chronicle mcp` 启动时同时指定 `--refine-base-url` 和 `--refine-model`，可启用新对话的自动提炼。需要鉴权时，通过 `CHRONICLE_REFINE_API_KEY` 环境变量提供密钥。完整轮次归档后，MCP 将该轮原文和相关认识发送给所配置的模型，生成的认识可通过 `support_record_ids` 追溯到原文。重试和重启沿用同一个归档版本的提炼任务。
+
 ## 测试
 
 运行 `go test ./...` 验证。端到端测试见[测试说明](docs/testing.md)。

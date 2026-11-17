@@ -44,9 +44,10 @@ const withdrawn = `EXISTS (
 )`
 
 type memoryStore struct {
-	path      string
-	namespace string
-	db        *sql.DB
+	path           string
+	namespace      string
+	db             *sql.DB
+	refineNewTurns bool
 }
 
 func sqliteDB(path string, pragmas ...string) (*sql.DB, error) {
@@ -101,7 +102,7 @@ func openStore(ctx context.Context, path, namespace string) (*memoryStore, error
 	if err != nil {
 		return nil, err
 	}
-	store := &memoryStore{path, namespace, db}
+	store := &memoryStore{path: path, namespace: namespace, db: db}
 	err = transaction(ctx, db, "BEGIN IMMEDIATE", func(conn *sql.Conn) error {
 		if _, err := conn.ExecContext(ctx, schema); err != nil {
 			return err
@@ -526,6 +527,10 @@ AND r.seq=(SELECT newer.seq FROM chronicle_experience AS newer
            WHERE newer.namespace=r.namespace AND newer.logical_id=r.logical_id AND newer.recorded_at<=?
            ORDER BY newer.seq DESC LIMIT 1)`
 	params := []any{strings.Join(all, " OR "), s.namespace, known, at, at, known}
+	if q.recordKind != "" {
+		query += " AND r.record_kind=?"
+		params = append(params, q.recordKind)
+	}
 	if f := q.Filters; f != nil {
 		for _, filter := range []struct {
 			name  string

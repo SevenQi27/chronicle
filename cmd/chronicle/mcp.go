@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"sync"
 	"time"
 
+	"github.com/SevenQi27/chronicle/internal/refine"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -78,12 +80,17 @@ func memoryServer(store *memoryStore) (*mcp.Server, error) {
 	return server, nil
 }
 
-func serveMCP(ctx context.Context, path, namespace, queue string, transport mcp.Transport) error {
+func serveMCP(ctx context.Context, path, namespace, queue string, transport mcp.Transport, model refine.Model) error {
 	store, err := openStore(ctx, path, namespace)
 	if err != nil {
 		return err
 	}
 	defer store.db.Close()
+	if model != nil {
+		if err := store.enableRefinement(ctx); err != nil {
+			return err
+		}
+	}
 	server, err := memoryServer(store)
 	if err != nil {
 		return err
@@ -92,26 +99,38 @@ func serveMCP(ctx context.Context, path, namespace, queue string, transport mcp.
 		queue = defaultQueue(path, namespace)
 	}
 	workerContext, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for workerContext.Err() == nil {
-			if err := drainCapture(workerContext, queue, store); err != nil && workerContext.Err() == nil {
-				log.Printf("Capture queue unavailable: %T", err)
-			}
-			select {
-			case <-workerContext.Done():
-			case <-ticker.C:
-			}
-		}
-	}()
+	var workers sync.WaitGroup
+	startMCPWorker(workerContext, &workers, "Capture queue unavailable", func(ctx context.Context) error {
+		return drainCapture(ctx, queue, store)
+	})
+	if model != nil {
+		startMCPWorker(workerContext, &workers, "Refinement failed", func(ctx context.Context) error {
+			return store.drainRefinement(ctx, model)
+		})
+	}
 	err = server.Run(ctx, transport)
 	cancel()
-	<-done
+	workers.Wait()
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}
 	return err
+}
+
+func startMCPWorker(ctx context.Context, workers *sync.WaitGroup, message string, process func(context.Context) error) {
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for ctx.Err() == nil {
+			if err := process(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("%s: %T", message, err)
+			}
+			select {
+			case <-ctx.Done():
+			case <-ticker.C:
+			}
+		}
+	}()
 }
