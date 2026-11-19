@@ -1,67 +1,256 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark"><meta name="description" content="Chronicle 本地记忆观测台：在三维空间中探索经历、认识与来源。">
-  <title>Chronicle — 记忆观测台</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%230c1217'/%3E%3Cellipse cx='32' cy='32' rx='24' ry='10' fill='none' stroke='%23a8efcf' stroke-width='3' transform='rotate(-35 32 32)'/%3E%3Ccircle cx='32' cy='32' r='7' fill='%23a8efcf'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/graph/style.css"><script src="/graph/app.js" defer></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Chronicle 本地时间记忆观测台。全息三维记忆星图与发光三列溯源流。">
+  <title>Chronicle — 全息记忆观测台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23050811'/%3E%3Cellipse cx='32' cy='32' rx='22' ry='9' fill='none' stroke='%23f5b971' stroke-width='2.6' transform='rotate(-32 32 32)'/%3E%3Ccircle cx='32' cy='32' r='5.5' fill='%23f5b971'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/graph/style.css">
+  <script src="/graph/app.js" defer></script>
 </head>
-<body>
-  <header class="topbar">
-    <a class="brand" href="/" aria-label="Chronicle 首页"><svg viewBox="0 0 42 42" aria-hidden="true"><ellipse cx="21" cy="21" rx="19" ry="8" transform="rotate(-35 21 21)"/><circle cx="21" cy="21" r="5"/></svg><span>chronicle<span class="brand-dot">.</span></span><span class="edition">OBSERVATORY</span></a>
-    <nav class="view-tabs" aria-label="图谱布局"><button class="view-tab active" data-layout="orbit" aria-pressed="true"><span>◎</span> 记忆宇宙</button><button class="view-tab" data-layout="timeline" aria-pressed="false"><span>≋</span> 时间轨迹</button></nav>
-    <div class="connection"><span class="status-dot" id="status-dot"></span><span id="connection-label">正在连接</span><span class="local-tag">LOCAL</span><button id="refresh" class="icon-button" aria-label="刷新记忆" title="刷新记忆">↻</button></div>
-  </header>
-  <main class="workspace">
-    <aside class="library">
-      <div class="workspace-label">WORKSPACE <span>↗</span></div>
-      <div class="namespace-row"><span class="namespace-icon">C</span><div><strong id="namespace">—</strong><small>私人记忆空间</small></div><span class="read-only">只读</span></div>
-      <label class="search"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg><input id="search" type="search" placeholder="搜索记忆与实体…" aria-label="搜索记忆与实体"><kbd>/</kbd></label>
-      <div class="section-heading">记忆图层 <span>LAYERS</span></div>
-      <div class="layers" aria-label="节点类型筛选">
-        <button class="layer active" data-kind="all" aria-pressed="true"><span class="layer-icon all">◈</span><span>全部节点</span><b id="count-all">00</b></button>
-        <button class="layer" data-kind="experience" aria-pressed="false"><span class="layer-icon experience">●</span><span>经历</span><b id="count-experience">00</b></button>
-        <button class="layer" data-kind="understanding" aria-pressed="false"><span class="layer-icon understanding">◆</span><span>认识</span><b id="count-understanding">00</b></button>
-        <button class="layer" data-kind="entity" aria-pressed="false"><span class="layer-icon entity">✳</span><span>人物与主题</span><b id="count-entity">00</b></button>
-        <button class="layer" data-kind="source" aria-pressed="false"><span class="layer-icon source">▤</span><span>来源证据</span><b id="count-source">00</b></button>
-        <button class="layer" data-kind="state" aria-pressed="false"><span class="layer-icon state">◷</span><span>事实与计划</span><b id="count-state">00</b></button>
+<body data-mode="orbit">
+  <!-- Full-bleed kinetic space stage -->
+  <div class="stage" id="canvas-area">
+    <div class="aurora aurora-a" aria-hidden="true"></div>
+    <div class="aurora aurora-b" aria-hidden="true"></div>
+    <div class="aurora aurora-c" aria-hidden="true"></div>
+    <div class="stage-grid" aria-hidden="true"></div>
+    <canvas id="graph" aria-label="三维全息记忆星图" aria-describedby="graph-hint" tabindex="0"></canvas>
+
+    <!-- Three-Column Luminous Provenance Flow View -->
+    <section id="flow-view" class="flow-view hidden" aria-label="三列发光溯源流">
+      <svg id="flow-svg" class="flow-svg" aria-hidden="true">
+        <defs>
+          <linearGradient id="beam-grad-1" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#f4b76e" stop-opacity="0.95"/>
+            <stop offset="50%" stop-color="#c09dff" stop-opacity="0.95"/>
+            <stop offset="100%" stop-color="#5be3b2" stop-opacity="0.95"/>
+          </linearGradient>
+          <linearGradient id="beam-grad-2" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#5be3b2" stop-opacity="0.95"/>
+            <stop offset="100%" stop-color="#74c2ff" stop-opacity="0.95"/>
+          </linearGradient>
+          <filter id="beam-glow" x="-30%" y="-30%" width="160%" height="160%">
+            <feGaussianBlur stdDeviation="3.5" result="blur"/>
+            <feMerge>
+              <feMergeNode in="blur"/>
+              <feMergeNode in="SourceGraphic"/>
+            </feMerge>
+          </filter>
+        </defs>
+        <g id="flow-paths"></g>
+      </svg>
+
+      <div class="flow-columns" id="flow-columns">
+        <div class="flow-col">
+          <div class="flow-col-head">
+            <span class="dot understanding"></span>
+            <h2>认识与核心记忆</h2>
+            <span class="pill-count" id="flow-col1-count">0</span>
+          </div>
+          <div id="flow-col-1" class="flow-col-body"></div>
+        </div>
+
+        <div class="flow-col">
+          <div class="flow-col-head">
+            <span class="dot experience"></span>
+            <h2>支撑经历与版本</h2>
+            <span class="pill-count" id="flow-col2-count">0</span>
+          </div>
+          <div id="flow-col-2" class="flow-col-body"></div>
+        </div>
+
+        <div class="flow-col">
+          <div class="flow-col-head">
+            <span class="dot source"></span>
+            <h2>原始来源证据</h2>
+            <span class="pill-count" id="flow-col3-count">0</span>
+          </div>
+          <div id="flow-col-3" class="flow-col-body"></div>
+        </div>
       </div>
-      <div class="section-heading recent-heading">探索记录 <span id="result-count">0</span></div>
-      <div id="memory-list" class="memory-list" aria-label="可选择的图谱节点"></div>
-      <div class="library-bottom"><span class="tiny-orbit">◎</span><p>每一次回忆，<br>都沿着证据发生。</p><small>BUILT ON SQLITE</small></div>
-    </aside>
-    <section class="observatory" aria-label="三维记忆图谱">
-      <div class="canvas-area" id="canvas-area">
-        <canvas id="graph" aria-label="拖拽旋转、滚轮缩放的三维记忆图谱；也可通过左侧列表选择节点。" tabindex="0"></canvas>
-        <div class="scene-heading"><div class="eyebrow"><span></span> YOUR MEMORY, IN ORBIT</div><h1>在时间里，<br>看见连接<span>。</span></h1><p>经历沉淀为记忆，证据连接成认识。</p></div>
-        <div class="scene-index"><span>LIVE GRAPH</span><strong id="graph-count">—</strong><small id="graph-caption">读取记忆图谱</small></div>
-        <div id="notice" class="notice hidden" role="status"></div>
-        <div id="empty" class="empty hidden"><span>◎</span><h2>你的记忆宇宙，等待第一颗星。</h2><p>让 Agent 使用 Chronicle 记录一段经历，<br>然后刷新这里，连接就会开始生长。</p><button id="empty-refresh" class="primary-button">刷新记忆 ↗</button></div>
-        <div class="scene-bottom"><span><i class="mint-dot"></i> <span id="scene-state">正在载入真实数据</span></span><div class="scene-controls"><button id="rotate" class="control-button" aria-pressed="true" title="切换自动旋转">Ⅱ <span>暂停旋转</span></button><button id="reset" class="control-button" title="恢复默认视角">⌖ <span>复位视角</span></button></div></div>
-        <div class="interaction-hint">拖拽旋转 <span>·</span> 滚轮缩放 <span>·</span> 点击探索</div>
-        <div id="tooltip" class="tooltip hidden"></div>
-      </div>
-      <section class="time-panel" aria-label="记录时间筛选">
-        <div class="time-heading"><div><span class="eyebrow">KNOWLEDGE TIMELINE</span><h2>记忆被记录的时间</h2></div><button id="time-reset" class="time-badge">全部时间 <span>↗</span></button></div>
-        <div class="timeline-track"><div class="timeline-ticks" id="timeline-ticks"></div><input id="time-range" type="range" min="0" max="1000" value="1000" aria-label="按获知时间筛选已加载的记忆版本"></div>
-        <div class="time-labels"><span id="time-start">—</span><span id="time-note">原始经历可以发生在更早的时间</span><span id="time-end">—</span></div>
-      </section>
     </section>
-    <aside class="inspector" aria-label="节点详情">
-      <div class="inspector-top"><span>记忆透镜</span><span class="mono" id="detail-index">/ 000</span></div>
-      <div id="detail-empty" class="detail-empty"><div class="lens-art">◎</div><h2>靠近一段记忆。</h2><p>点击图中的节点，查看它的完整内容、时间与证据。</p></div>
-      <div id="detail-content" class="detail-content hidden">
-        <div class="detail-type"><span id="detail-kind" class="type-pill"></span><span id="detail-version" class="muted"></span></div>
-        <h2 id="detail-title"></h2>
-        <div class="detail-meta" id="detail-meta"></div>
-        <div class="detail-section"><div class="section-heading" id="content-heading">记忆正文</div><p id="detail-text" class="detail-text"></p></div>
-        <div class="detail-section"><div class="section-heading">关联节点 <span id="detail-link-count">0</span></div><div id="detail-links" class="detail-links"></div></div>
-        <details class="technical-detail"><summary>记录标识与结构 <span>＋</span></summary><pre id="detail-json"></pre></details>
+
+    <div id="empty" class="empty-card hidden">
+      <div class="empty-orb" aria-hidden="true">◈</div>
+      <h3 id="empty-title">还没有记忆</h3>
+      <p id="empty-desc">让 Agent 使用 Chronicle 记录一段经历，然后刷新观测台。</p>
+      <button id="empty-refresh" class="hud-btn accent" type="button">刷新记忆</button>
+    </div>
+
+    <div id="tooltip" class="tooltip hidden" aria-hidden="true"></div>
+    <div id="notice" class="notice hidden" role="status"></div>
+  </div>
+
+  <!-- Top floating HUD command bar -->
+  <header class="topbar">
+    <div class="border-beam" aria-hidden="true"></div>
+    <div class="topbar-left">
+      <a class="brand" href="/" aria-label="Chronicle 首页">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-name">Chronicle</span>
+      </a>
+      <span class="divider" aria-hidden="true"></span>
+      <div class="space-badge" title="当前只读记忆空间">
+        <span class="status-dot" id="status-dot" aria-hidden="true"></span>
+        <span id="namespace">—</span>
+        <span class="status-text" id="connection-label" role="status">连接中</span>
       </div>
-      <div class="inspector-footer"><span class="shield">◇</span><span>真实记忆 · 来源可追溯<br><small>所有数据保留在这台电脑上</small></span></div>
-    </aside>
-  </main>
+      <div class="hud-metrics" aria-label="记忆统计">
+        <span class="metric"><i class="dot understanding"></i><b id="stat-understanding">0</b> 认识</span>
+        <span class="metric"><i class="dot experience"></i><b id="stat-experience">0</b> 经历</span>
+        <span class="metric"><i class="dot source"></i><b id="stat-source">0</b> 证据</span>
+        <span class="metric"><i class="dot edge"></i><b id="stat-edges">0</b> 关联</span>
+      </div>
+    </div>
+
+    <nav class="mode-switch" aria-label="视图模式" role="tablist">
+      <span class="mode-thumb" id="mode-thumb" aria-hidden="true"></span>
+      <button class="mode-btn active" type="button" role="tab" data-mode="orbit" aria-selected="true">✦ 全息星图</button>
+      <button class="mode-btn" type="button" role="tab" data-mode="timeline" aria-selected="false">⟿ 时空轨迹</button>
+      <button class="mode-btn" type="button" role="tab" data-mode="flow" aria-selected="false">⚡ 溯源光流</button>
+    </nav>
+
+    <div class="topbar-right">
+      <button id="ego-toggle" class="hud-btn" type="button" aria-label="聚焦子图" aria-pressed="false" title="仅高亮并聚焦当前选中节点的关联网络">
+        <span class="btn-glyph" aria-hidden="true">◎</span><span>聚焦子图</span>
+      </button>
+      <button id="pulse-toggle" class="hud-btn" type="button" aria-label="神经脉冲" aria-pressed="true" title="神经电脉冲特效开关">
+        <span class="btn-glyph" aria-hidden="true">⚡</span><span>神经脉冲</span>
+      </button>
+      <button id="toggle-left" class="hud-btn icon-only" type="button" aria-pressed="true" aria-label="收起或展开左侧索引" title="切换左侧索引 ( [ )">☰</button>
+      <button id="toggle-right" class="hud-btn icon-only" type="button" aria-pressed="true" aria-label="收起或展开右侧详情" title="切换右侧详情 ( ] )">◨</button>
+      <button id="refresh" class="hud-btn" type="button" aria-label="刷新" title="重新从 SQLite 同步">
+        <span class="spin-glyph" aria-hidden="true">↻</span><span>刷新</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Left floating Index Drawer -->
+  <aside id="left-drawer" class="drawer left-drawer" aria-label="记忆索引">
+    <div class="drawer-head">
+      <h1 class="drawer-title">记忆索引</h1>
+      <span class="pill-count" id="result-count">0</span>
+    </div>
+
+    <label class="search-box">
+      <span class="search-icon" aria-hidden="true">⌕</span>
+      <input id="search" type="search" placeholder="搜索标题、正文、实体别名…" aria-label="搜索记忆与实体">
+      <kbd aria-hidden="true">/</kbd>
+    </label>
+
+    <div class="kind-filters" role="group" aria-label="节点类型筛选">
+      <button class="kind-chip active" type="button" data-kind="all" aria-pressed="true">
+        <span class="dot all"></span><span>全部</span><b id="count-all">0</b>
+      </button>
+      <button class="kind-chip" type="button" data-kind="understanding" aria-pressed="false">
+        <span class="dot understanding"></span><span>认识</span><b id="count-understanding">0</b>
+      </button>
+      <button class="kind-chip" type="button" data-kind="experience" aria-pressed="false">
+        <span class="dot experience"></span><span>经历</span><b id="count-experience">0</b>
+      </button>
+      <button class="kind-chip" type="button" data-kind="entity" aria-pressed="false">
+        <span class="dot entity"></span><span>人物/主题</span><b id="count-entity">0</b>
+      </button>
+      <button class="kind-chip" type="button" data-kind="source" aria-pressed="false">
+        <span class="dot source"></span><span>来源证据</span><b id="count-source">0</b>
+      </button>
+      <button class="kind-chip" type="button" data-kind="state" aria-pressed="false">
+        <span class="dot state"></span><span>事实/计划</span><b id="count-state">0</b>
+      </button>
+    </div>
+
+    <div id="memory-list" class="memory-list" role="listbox" aria-label="匹配记忆列表"></div>
+    <div id="list-more-wrap" class="list-more-wrap hidden">
+      <button id="list-more" class="hud-btn full-width" type="button">显示更多</button>
+    </div>
+  </aside>
+
+  <!-- Right floating Inspector Sheet -->
+  <aside id="right-drawer" class="drawer right-drawer" aria-labelledby="inspector-heading">
+    <div class="inspector-accent" id="inspector-accent" aria-hidden="true"></div>
+    <div class="drawer-head">
+      <h2 class="drawer-title" id="inspector-heading" tabindex="-1">节点溯源</h2>
+      <div class="head-actions">
+        <span id="detail-version" class="version-tag"></span>
+        <button id="close-right" class="icon-close" type="button" aria-label="关闭详情面板">×</button>
+      </div>
+    </div>
+
+    <div id="detail-empty" class="detail-empty">
+      <div class="empty-ring" aria-hidden="true">◎</div>
+      <p>点击星图节点或左侧索引，触发能量聚焦并查看完整证据链。</p>
+    </div>
+
+    <div id="detail-content" class="detail-content hidden">
+      <div class="detail-badges">
+        <span id="detail-kind" class="kind-badge"></span>
+        <span id="detail-basis" class="basis-badge hidden"></span>
+      </div>
+      <h3 id="detail-title" class="detail-title"></h3>
+
+      <div class="detail-meta" id="detail-meta"></div>
+
+      <section class="detail-block" aria-labelledby="content-heading">
+        <h4 class="block-label" id="content-heading">记忆正文</h4>
+        <div id="detail-text" class="detail-text"></div>
+      </section>
+
+      <section class="detail-block" aria-labelledby="provenance-heading">
+        <div class="block-head">
+          <h4 class="block-label" id="provenance-heading">证据与关联链</h4>
+          <span class="pill-count" id="detail-link-count">0</span>
+        </div>
+        <div id="detail-links" class="provenance-groups"></div>
+      </section>
+
+      <details class="raw-payload">
+        <summary>查看原始记录结构 (JSON)</summary>
+        <pre id="detail-json"></pre>
+      </details>
+    </div>
+  </aside>
+
+  <!-- Bottom floating Time Machine & Camera Controls -->
+  <footer class="bottom-dock" id="bottom-dock">
+    <section class="time-dock" aria-labelledby="time-heading">
+      <div class="time-top">
+        <div class="time-title-wrap">
+          <button id="time-play" class="play-btn" type="button" aria-pressed="false" title="播放/暂停记忆演化星爆回放">▶</button>
+          <div>
+            <h2 id="time-heading" class="time-title">时间机器 <span class="mono-dim">known_at</span></h2>
+            <p class="time-sub" id="graph-caption">正在同步记忆宇宙…</p>
+          </div>
+        </div>
+        <div class="time-actions">
+          <span class="visible-pill"><strong id="graph-count">0</strong> 节点</span>
+          <button id="time-reset" class="time-pill" type="button" title="重置为全部时间">全部时间</button>
+        </div>
+      </div>
+
+      <div class="scrubber-wrap">
+        <div class="histogram" id="timeline-ticks" aria-hidden="true"></div>
+        <div class="scrubber-rail">
+          <div class="scrubber-fill" id="scrubber-fill"></div>
+          <input id="time-range" type="range" min="0" max="1000" value="1000" aria-label="按获知时间筛选" aria-valuetext="全部时间">
+        </div>
+      </div>
+
+      <div class="time-axis">
+        <span id="time-start">—</span>
+        <span id="graph-hint" class="canvas-hint">惯性拖拽旋转 · 滚轮缩放 · 点击触发神经光束聚焦</span>
+        <span id="time-end">—</span>
+      </div>
+    </section>
+
+    <div class="camera-dock" id="camera-dock" role="group" aria-label="画布视角控制">
+      <button id="rotate" class="hud-btn compact" type="button" aria-pressed="true" title="自动公转">公转中</button>
+      <button id="reset" class="hud-btn compact" type="button" title="复位视角">复位</button>
+    </div>
+  </footer>
+
   <div id="announcement" class="sr-only" aria-live="polite"></div>
 </body>
 </html>
